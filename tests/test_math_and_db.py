@@ -1,5 +1,9 @@
 import sympy as sp
 from src.database.db import init_db, add_student, get_student
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 def test_sympy_solver():
     x = sp.Symbol('x')
