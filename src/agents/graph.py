@@ -2,10 +2,12 @@ import json
 import os
 from pathlib import Path
 import re
-from typing import Optional, TypedDict
+from typing import Optional, TypedDict, Any, Dict
 import httpx
 from langgraph.graph import END, StateGraph
 import sympy as sp
+from src.tools.sandbox import run_sandboxed_math
+
 
 from src.database.db import (
     get_student,
@@ -150,41 +152,49 @@ def sympy_verify_node(state: AgentState) -> dict:
   }
 
 
-def solution_checker_node(state: AgentState) -> dict:
-  prompt_text = state.get("user_prompt", "")
-  is_correct = False
-  details = "Проверка выполнена."
+def solution_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
+  task_condition = state.get("task_condition", "")
+  student_answer = state.get("student_answer", "")
 
-  match_eq = re.search(r"(\d+)\s*\*\s*x\s*([+-])\s*(\d+)\s*=\s*(\d+)", prompt_text)
-  match_ans = re.search(r"x\s*=\s*(-?\d+(\.\d+)?)", prompt_text)
+  math_res = run_sandboxed_math(task_condition, variable="x", timeout_sec=3.0)
 
-  if match_eq and match_ans:
-    a = float(match_eq.group(1))
-    op = match_eq.group(2)
-    b = float(match_eq.group(3))
-    c = float(match_eq.group(4))
-    student_x = float(match_ans.group(1))
+  if math_res["status"] != "success":
+    return {
+        "is_correct": False,
+        "math_solution": (
+            f"Песочница вернула статус '{math_res['status']}':"
+            f" {math_res['error']}"
+        ),
+    }
 
-    x = sp.Symbol("x")
-    expr = a * x + b - c if op == "+" else a * x - b - c
-    actual_roots = sp.solve(expr, x)
+  roots = math_res["roots"]
+  if not roots:
+    return {
+        "is_correct": False,
+        "math_solution": "Уравнение не имеет действительных решений.",
+    }
 
-    if actual_roots:
-      correct_x = float(actual_roots[0].evalf())
-      is_correct = abs(correct_x - student_x) < 1e-4
-      details = f"Точный корень SymPy: {correct_x}. Ответ ученика: {student_x}."
-  else:
-    llm_check = query_ollama(
-        model="llama3.2:3b",
-        prompt=f"Проверь решение ученика: '{prompt_text}'. Верно ли? Ответь ДА или НЕТ и кратко укажи верный ответ.",
-        num_predict=80,
+  expected_root = roots[0]["numeric"]
+
+  try:
+    if "=" in student_answer:
+      ans_val = float(student_answer.split("=")[1].strip())
+    else:
+      ans_val = float(student_answer.strip())
+
+    is_correct = bool(abs(expected_root - ans_val) < 1e-6)
+    solution_desc = (
+        f"Точный корень SymPy: {expected_root}. Ответ ученика: {ans_val}."
     )
-    is_correct = "ДА" in llm_check.upper()
-    details = llm_check
+  except Exception as e:
+    is_correct = False
+    solution_desc = (
+        f"Не удалось распарсить ответ ученика '{student_answer}': {str(e)}"
+    )
 
   return {
       "is_correct": is_correct,
-      "math_solution": details,
+      "math_solution": solution_desc,
   }
 
 
