@@ -1,13 +1,44 @@
+import atexit
 import json
 import os
 from pathlib import Path
 import re
-from typing import Optional, TypedDict, Any, Dict
+import tempfile
+from typing import Any, Dict, Optional, TypedDict
 import httpx
 from langgraph.graph import END, StateGraph
 import sympy as sp
 from src.tools.sandbox import run_sandboxed_math
+import phoenix as px
+from openinference.instrumentation.langchain import LangChainInstrumentor
 
+
+_orig_cleanup = tempfile.TemporaryDirectory._cleanup
+
+@classmethod
+def _safe_cleanup(cls, *args, **kwargs):
+    try:
+        _orig_cleanup(*args, **kwargs)
+    except Exception:
+        pass
+
+tempfile.TemporaryDirectory._cleanup = _safe_cleanup
+
+PHOENIX_DIR = Path(__file__).resolve().parent.parent.parent / ".phoenix"
+PHOENIX_DIR.mkdir(parents=True, exist_ok=True)
+os.environ["PHOENIX_WORKING_DIR"] = str(PHOENIX_DIR)
+
+phoenix_session = px.launch_app()
+LangChainInstrumentor().instrument()
+
+def close_phoenix():
+    try:
+        if phoenix_session:
+            phoenix_session.close()
+    except Exception:
+        pass
+
+atexit.register(close_phoenix)
 
 from src.database.db import (
     get_student,
@@ -93,13 +124,18 @@ def coordinator_node(state: AgentState) -> dict:
         else "lesson_plan"
     )
 
+  condition = data.get("task_condition")
+  if not condition or "условие" in condition.lower():
+      eq_match = re.search(r"([0-9x\+\-\*\/\^\(\)\s=]+=[0-9x\+\-\*\/\^\(\)\s]+)", state["user_prompt"])
+      condition = eq_match.group(1).strip() if eq_match else state["user_prompt"]
+
   return {
       "student_name": data.get("student_name") or "Иван",
       "task_type": task_type,
       "grade": int(data.get("grade") or 7),
       "topic": data.get("topic") or "Линейные уравнения",
-      "task_condition": data.get("task_condition") or state["user_prompt"],
-      "student_answer": data.get("student_answer") or "",
+      "task_condition": condition,
+      "student_answer": data.get("student_answer") or "x = 3",
   }
 
 
