@@ -1,0 +1,54 @@
+{
+  "total_cases": 5,
+  "correct_verdicts": 5,
+  "verdict_accuracy_percent": 100.0,
+  "sandbox_success_percent": 100.0,
+  "avg_case_latency_sec": 14.81,
+  "results": [
+    {
+      "id": "task_01",
+      "prompt": "Проверь решение Ивана по задаче 2*x + 4 = 10. Ученик ответил x = 3.",
+      "expected_is_correct": true,
+      "predicted_is_correct": true,
+      "is_match": true,
+      "math_solution": "Точный корень SymPy: 3.0. Ответ ученика: 3.0.",
+      "latency_sec": 15.99
+    },
+    {
+      "id": "task_02",
+      "prompt": "Проверь решение Ивана по задаче 3*x - 6 = 12. Ученик ответил x = 4.",
+      "expected_is_correct": false,
+      "predicted_is_correct": false,
+      "is_match": true,
+      "math_solution": "Точный корень SymPy: 6.0. Ответ ученика: 4.0.",
+      "latency_sec": 16.3
+    },
+    {
+      "id": "task_03",
+      "prompt": "Проверь решение Ивана по задаче 5*x + 15 = 0. Ученик ответил x = -3.",
+      "expected_is_correct": true,
+      "predicted_is_correct": true,
+      "is_match": true,
+      "math_solution": "Точный корень SymPy: -3.0. Ответ ученика: -3.0.",
+      "latency_sec": 12.26
+    },
+    {
+      "id": "task_04",
+      "prompt": "Проверь решение Ивана по задаче 4*x - 8 = 2. Ученик ответил x = 2.",
+      "expected_is_correct": false,
+      "predicted_is_correct": false,
+      "is_match": true,
+      "math_solution": "Точный корень SymPy: 2.5. Ответ ученика: 2.0.",
+      "latency_sec": 16.32
+    },
+    {
+      "id": "task_05",
+      "prompt": "Проверь решение Ивана по задаче 7*x = 0. Ученик ответил x = 0.",
+      "expected_is_correct": true,
+      "predicted_is_correct": true,
+      "is_match": true,
+      "math_solution": "Точный корень SymPy: 0.0. Ответ ученика: 0.0.",
+      "latency_sec": 13.19
+    }
+  ]
+}

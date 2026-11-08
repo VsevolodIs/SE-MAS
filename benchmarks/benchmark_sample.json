@@ -1,0 +1,42 @@
+[
+  {
+    "id": "task_01",
+    "topic": "Линейные уравнения",
+    "prompt": "Проверь решение Ивана по задаче 2*x + 4 = 10. Ученик ответил x = 3.",
+    "expected_condition": "2*x + 4 = 10",
+    "expected_root": 3.0,
+    "expected_is_correct": true
+  },
+  {
+    "id": "task_02",
+    "topic": "Линейные уравнения",
+    "prompt": "Проверь решение Ивана по задаче 3*x - 6 = 12. Ученик ответил x = 4.",
+    "expected_condition": "3*x - 6 = 12",
+    "expected_root": 6.0,
+    "expected_is_correct": false
+  },
+  {
+    "id": "task_03",
+    "topic": "Отрицательные числа",
+    "prompt": "Проверь решение Ивана по задаче 5*x + 15 = 0. Ученик ответил x = -3.",
+    "expected_condition": "5*x + 15 = 0",
+    "expected_root": -3.0,
+    "expected_is_correct": true
+  },
+  {
+    "id": "task_04",
+    "topic": "Линейные уравнения",
+    "prompt": "Проверь решение Ивана по задаче 4*x - 8 = 2. Ученик ответил x = 2.",
+    "expected_condition": "4*x - 8 = 2",
+    "expected_root": 2.5,
+    "expected_is_correct": false
+  },
+  {
+    "id": "task_05",
+    "topic": "Линейные уравнения",
+    "prompt": "Проверь решение Ивана по задаче 7*x = 0. Ученик ответил x = 0.",
+    "expected_condition": "7*x = 0",
+    "expected_root": 0.0,
+    "expected_is_correct": true
+  }
+]
