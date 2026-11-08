@@ -3,25 +3,71 @@ import csv
 import json
 import time
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 SUPPORTED = {"check_solution": "/api/v1/check-solution"}
-FIELDS = ["id", "task_type", "endpoint", "status", "http_status", "elapsed_s", "is_correct", "feedback", "math_solution", "error"]
+FIELDS = [
+    "id", "task_type", "endpoint", "status", "http_status", "elapsed_s",
+    "is_correct", "feedback", "math_solution", "error",
+]
+
+# Explicit, reviewed API payloads. These are test fixtures, not dataset ground truth.
+# Review each against benchmarks/dataset.jsonl before interpreting test results.
+CHECK_SOLUTION_PAYLOADS = {
+    "TF-020": {
+        "problem": "2(x+3)=14",
+        "student_solution": "2x+3=14; 2x=11; x=5,5",
+    },
+    "TF-021": {
+        "problem": "x^2 - 9 = 0",
+        "student_solution": "(x-3)(x+3)=0; x=3 или x=-3",
+    },
+    "TF-022": {
+        "problem": "(x^2 - 4)/(x - 2) = 0",
+        "student_solution": "x=2 или x=-2",
+    },
+    "TF-023": {
+        "problem": "Найди 20% от 250",
+        "student_solution": "20% от 250 — это 50",
+    },
+    "TF-024": {
+        "problem": "x^2 - 4 < 0",
+        "student_solution": "x < -2 или x > 2",
+    },
+    "TF-025": {
+        "problem": "Два числа в сумме дают 25, одно на 7 больше другого.",
+        "student_solution": "Числа 16 и 9",
+    },
+    "TF-026": {
+        "problem": "Существует ли треугольник со сторонами 3, 4 и 8?",
+        "student_solution": "Да, третья сторона может быть 8",
+    },
+}
 
 
 def request_json(url, method="GET", payload=None, timeout=180):
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = Request(url, data=data, method=method, headers={"Content-Type": "application/json; charset=utf-8"})
+    request = Request(
+        url,
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+    )
     try:
-        with urlopen(req, timeout=timeout) as response:
+        with urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8")
             return response.status, json.loads(body) if body else {}
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        return exc.code, {"error": body}
+        try:
+            decoded = json.loads(body)
+        except ValueError:
+            decoded = {"error": body}
+        return exc.code, decoded
 
 
 def load_dataset(path):
@@ -31,75 +77,149 @@ def load_dataset(path):
         if not line.strip():
             continue
         item = json.loads(line)
-        if not isinstance(item, dict) or not isinstance(item.get("input"), dict) or not isinstance(item["input"].get("prompt"), str):
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), str)
+            or not isinstance(item.get("input"), dict)
+            or not isinstance(item["input"].get("prompt"), str)
+        ):
             raise ValueError(f"Invalid record on line {number}")
-        if item.get("id") in ids:
-            raise ValueError(f"Duplicate test ID on line {number}: {item.get('id')}")
-        ids.add(item.get("id"))
+        if item["id"] in ids:
+            raise ValueError(f"Duplicate test ID on line {number}: {item['id']}")
+        ids.add(item["id"])
         rows.append(item)
     return rows
 
 
 def main():
-    p = argparse.ArgumentParser(description="Audit SE-MAS coverage and optionally run real check-solution cases against FastAPI")
-    p.add_argument("--dataset", type=Path, default=ROOT / "benchmarks" / "dataset.jsonl")
-    p.add_argument("--out", type=Path, default=ROOT / "results" / "integration")
-    p.add_argument("--base-url", default="http://127.0.0.1:8000")
-    p.add_argument("--live", action="store_true", help="Call the real API (may trigger LLM inference and DB writes)")
-    p.add_argument("--limit", type=int, default=0, help="Max supported real API calls; 0=all supported")
-    p.add_argument("--timeout", type=int, default=240)
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(
+        description="Audit SE-MAS dataset coverage and optionally call the real check-solution API"
+    )
+    parser.add_argument("--dataset", type=Path, default=ROOT / "benchmarks" / "dataset.jsonl")
+    parser.add_argument("--out", type=Path, default=ROOT / "results" / "integration")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--live", action="store_true", help="Call real agents; may write to the API database")
+    parser.add_argument("--id", dest="test_id", help="Run just this dataset case, e.g. TF-020")
+    parser.add_argument("--limit", type=int, default=0, help="Maximum supported API calls (0 = all)")
+    parser.add_argument("--timeout", type=int, default=240)
+    args = parser.parse_args()
     if args.limit < 0:
-        p.error("--limit must not be negative")
+        parser.error("--limit must be nonnegative")
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
+
     dataset = load_dataset(args.dataset)
+    if args.test_id:
+        dataset = [item for item in dataset if item["id"] == args.test_id]
+        if not dataset:
+            parser.error(f"Unknown test ID: {args.test_id}")
+
+    # Never overwrite an earlier run (including historical integration reports).
     args.out.mkdir(parents=True, exist_ok=True)
-    output = []
+    run_type = "live" if args.live else "audit"
+    run_dir = args.out / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{run_type}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+
+    results = []
+    raw_responses = []
     attempted = 0
     base = args.base_url.rstrip("/")
+
     if args.live:
         try:
             status, health = request_json(base + "/health", timeout=10)
             print(f"API /health: HTTP {status} | {health}")
-        except (URLError, TimeoutError, OSError) as exc:
-            p.error(f"API not available: {exc}. Run uvicorn first.")
+            if status != 200:
+                parser.error("API health check did not return HTTP 200")
+        except (URLError, TimeoutError, OSError, ValueError) as exc:
+            parser.error(f"API not available: {exc}. Start the FastAPI server first.")
+
     for record in dataset:
         task = record.get("task_type", "unknown")
+        rec_id = record["id"]
         endpoint = SUPPORTED.get(task)
-        item = {"id": record.get("id"), "task_type": task, "endpoint": endpoint or "", "status": "unsupported", "http_status": "", "elapsed_s": "", "is_correct": "", "feedback": "", "math_solution": "", "error": ""}
+        item = {
+            "id": rec_id,
+            "task_type": task,
+            "endpoint": endpoint or "",
+            "status": "unsupported",
+            "http_status": "",
+            "elapsed_s": "",
+            "is_correct": "",
+            "feedback": "",
+            "math_solution": "",
+            "error": "",
+        }
         if endpoint:
-            item["status"] = "ready_for_api"
-            if args.live and (args.limit == 0 or attempted < args.limit):
-                attempted += 1
-                t0 = time.perf_counter()
-                try:
-                    http_status, response = request_json(base + endpoint, "POST", {"prompt": record["input"]["prompt"]}, args.timeout)
-                    item["elapsed_s"] = round(time.perf_counter() - t0, 3)
-                    item["http_status"] = http_status
-                    item["status"] = "api_ok" if http_status == 200 else "api_error"
-                    if http_status == 200:
-                        item["is_correct"] = response.get("is_correct")
-                        item["math_solution"] = response.get("math_solution", "")
-                        item["feedback"] = response.get("feedback", "")
-                    else:
-                        item["error"] = str(response.get("error", response))[:500]
-                except (URLError, TimeoutError, OSError, ValueError) as exc:
-                    item["status"] = "api_error"
-                    item["elapsed_s"] = round(time.perf_counter() - t0, 3)
-                    item["error"] = str(exc)[:500]
-        output.append(item)
+            payload = CHECK_SOLUTION_PAYLOADS.get(rec_id)
+            if payload is None:
+                item["status"] = "missing_payload"
+                item["error"] = "No reviewed payload for this test ID; request not sent"
+            else:
+                item["status"] = "ready_for_api"
+                if args.live and (args.limit == 0 or attempted < args.limit):
+                    attempted += 1
+                    started = time.perf_counter()
+                    try:
+                        http_status, response = request_json(
+                            base + endpoint, "POST", payload, args.timeout
+                        )
+                        item["elapsed_s"] = round(time.perf_counter() - started, 3)
+                        item["http_status"] = http_status
+                        item["status"] = "api_ok" if http_status == 200 else "api_error"
+                        raw_responses.append({
+                            "id": rec_id,
+                            "request": payload,
+                            "http_status": http_status,
+                            "response": response,
+                            "expected_checks": record.get("checks"),
+                        })
+                        if http_status == 200 and isinstance(response, dict):
+                            item["is_correct"] = response.get("is_correct", "")
+                            item["math_solution"] = response.get("math_solution", "")
+                            item["feedback"] = response.get("feedback", "")
+                        elif http_status != 200:
+                            item["error"] = json.dumps(response, ensure_ascii=False)[:1000]
+                    except (URLError, TimeoutError, OSError, ValueError) as exc:
+                        item["status"] = "api_error"
+                        item["elapsed_s"] = round(time.perf_counter() - started, 3)
+                        item["error"] = str(exc)[:1000]
+                        raw_responses.append({
+                            "id": rec_id,
+                            "request": payload,
+                            "error": str(exc),
+                            "expected_checks": record.get("checks"),
+                        })
+                elif args.live:
+                    item["status"] = "not_run_limit"
+        results.append(item)
         print(f"{item['id']}: {item['task_type']} -> {item['status']}", flush=True)
 
-    with (args.out / "integration_results.jsonl").open("w", encoding="utf-8") as file:
-        for item in output:
+    with (run_dir / "integration_results.jsonl").open("w", encoding="utf-8") as file:
+        for item in results:
             file.write(json.dumps(item, ensure_ascii=False) + "\n")
-    with (args.out / "integration_results.csv").open("w", encoding="utf-8-sig", newline="") as file:
+    with (run_dir / "integration_results.csv").open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=FIELDS)
         writer.writeheader()
-        writer.writerows(output)
-    summary = {"dataset_count": len(dataset), "task_types": dict(Counter(r.get("task_type", "unknown") for r in dataset)), "statuses": dict(Counter(r["status"] for r in output)), "live": args.live, "api_calls": attempted, "note": "api_ok means HTTP 200, NOT semantic correctness. Human/automatic scoring remains separate."}
-    (args.out / "integration_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        writer.writerows(results)
+    if args.live:
+        with (run_dir / "raw_api_responses.jsonl").open("w", encoding="utf-8") as file:
+            for record in raw_responses:
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    summary = {
+        "dataset_count": len(dataset),
+        "task_types": dict(Counter(r.get("task_type", "unknown") for r in dataset)),
+        "statuses": dict(Counter(r["status"] for r in results)),
+        "live": args.live,
+        "api_calls": attempted,
+        "note": "api_ok means HTTP 200, NOT semantic correctness. Review raw_api_responses.jsonl.",
+    }
+    (run_dir / "integration_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     print("SUMMARY", json.dumps(summary, ensure_ascii=False), flush=True)
-    print(f"Saved to: {args.out}")
+    print(f"Saved to: {run_dir}")
 
 
 if __name__ == "__main__":
