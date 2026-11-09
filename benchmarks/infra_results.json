@@ -1,0 +1,29 @@
+{
+  "sympy_sandbox": {
+    "equation": "2*x + 4 = 10",
+    "status": "success",
+    "runs": 5,
+    "avg_latency_sec": 0.00775
+  },
+  "models_latency": {
+    "qwen2.5:0.5b": {
+      "model": "qwen2.5:0.5b",
+      "runs": 2,
+      "avg_latency_sec": 1.08,
+      "min_latency_sec": 0.6,
+      "max_latency_sec": 1.56
+    },
+    "mistral:7b": {
+      "model": "mistral:7b",
+      "runs": 2,
+      "avg_latency_sec": 8.359,
+      "min_latency_sec": 6.115,
+      "max_latency_sec": 10.602
+    }
+  },
+  "end_to_end_pipeline": {
+    "test_prompt": "Проверь решение Ивана по задаче 2*x + 4 = 10. Ученик ответил x = 3.",
+    "total_latency_sec": 9.82,
+    "nodes_flow": "coordinator -> student_profile -> solution_checker -> validator -> save_db"
+  }
+}
