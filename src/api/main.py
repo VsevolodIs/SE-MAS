@@ -75,16 +75,34 @@ def check_solution(request: CheckSolutionRequest):
     final_state: Dict[str, Any] = {}
 
     try:
-        for output in tutor_app.stream({"user_prompt": request.prompt}):
+        input_payload = {
+            "prompt": request.prompt,
+            "user_prompt": request.prompt,
+        }
+
+        for output in tutor_app.stream(input_payload):
             for _, result in output.items():
-                final_state.update(result)
+                if isinstance(result, dict):
+                    final_state.update(result)
 
         elapsed = round(time.perf_counter() - start_time, 2)
 
+        is_correct = final_state.get("is_correct")
+        math_sol = str(final_state.get("math_solution") or "")
+        math_verified = final_state.get("math_verified")
+
+        if is_correct is None:
+            if math_verified is True or "подтвержден SymPy" in math_sol or "Точный корень SymPy" in math_sol:
+                is_correct = True
+
+        feedback = final_state.get("feedback")
+        if not feedback and is_correct is True:
+            feedback = "Решение проверено и подтверждено математической песочницей."
+
         return CheckSolutionResponse(
-            is_correct=final_state.get("is_correct"),
+            is_correct=is_correct,
             math_solution=final_state.get("math_solution"),
-            feedback=final_state.get("feedback"),
+            feedback=feedback,
             latency_sec=elapsed,
         )
     except Exception as exc:

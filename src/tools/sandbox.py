@@ -67,12 +67,12 @@ def preprocess_math_string(raw_str: str) -> str:
 
 
 def extract_math_relation(raw_str: str) -> Optional[str]:
-    # Поиск знаков отношения: =, <=, >=, <, >
-    pattern = r"([0-9a-zA-Z_\*\+\-\/\^\(\)\.\s]+(?:\<=|\>=|\<|\>|=)\s*[-+]?[0-9a-zA-Z_\*\+\-\/\^\(\)\.]+)"
+    # Ищем выражение с оператором, исключая захват посторонних слов и концевых точек
+    pattern = r"((?:[0-9a-zA-Z_\*\+\-\/\^\(\)]|\s(?=[0-9a-zA-Z_\*\+\-\/\^\(\)]))+(?:<=|>=|<|>|=)\s*[-+]?[0-9a-zA-Z_\*\+\-\/\^\(\)\.]+)"
     match = re.search(pattern, raw_str)
     if match:
         eq = match.group(1).strip()
-        return eq.rstrip(".;, ")
+        return re.sub(r"[.;,\s]+$", "", eq)
     return None
 
 
@@ -167,40 +167,45 @@ def run_sandboxed_math(
             "error": str(e),
         }
 
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_solve_equation_worker, eq_str, variable)
-            res = future.result(timeout=timeout_sec)
+        future = executor.submit(_solve_equation_worker, eq_str, variable)
+        res = future.result(timeout=timeout_sec)
 
-            if res.get("type") == "unsupported_format":
-                return {
-                    "status": "unsupported_format",
-                    "roots": [],
-                    "details": res,
-                    "error": "Инструмент не поддерживает текстовый формат задачи; требуется обработка LLM-валидатором",
-                }
-
+        if res.get("type") == "unsupported_format":
             return {
-                "status": "success",
-                "roots": res.get("roots", []),
+                "status": "unsupported_format",
+                "roots": [],
                 "details": res,
-                "error": None,
+                "error": "Инструмент не поддерживает текстовый формат задачи; требуется обработка LLM-валидатором",
             }
+
+        return {
+            "status": "success",
+            "roots": res.get("roots", []),
+            "details": res,
+            "error": None,
+        }
     except concurrent.futures.TimeoutError:
+        executor.shutdown(wait=False, cancel_futures=True)
         return {
             "status": "timeout_error",
             "roots": [],
             "error": f"Превышен лимит времени вычисления ({timeout_sec} сек)",
         }
     except MathSecurityError as e:
+        executor.shutdown(wait=False)
         return {
             "status": "security_error",
             "roots": [],
             "error": str(e),
         }
     except Exception as e:
+        executor.shutdown(wait=False)
         return {
             "status": "math_error",
             "roots": [],
             "error": f"Ошибка парсинга/вычисления: {str(e)}",
         }
+    finally:
+        executor.shutdown(wait=False)

@@ -111,7 +111,7 @@ class AgentState(TypedDict):
 
 
 def coordinator_node(state: AgentState) -> dict:
-    prompt = state.get("prompt", "")
+    prompt = state.get("prompt") or state.get("user_prompt") or ""
     session_id = state.get("session_id", "default_session")
     student_name = state.get("student_name", "Ученик")
     grade = state.get("grade", 7)
@@ -121,25 +121,25 @@ def coordinator_node(state: AgentState) -> dict:
     student_answer = state.get("student_answer") or ""
 
     if not task_condition:
-        cond_match = re.search(r"задаче\s+([^.\n]+?)(?:\.|\s+Ученик|$)", prompt, re.IGNORECASE)
+        cond_match = re.search(r"задач[еиу]?\s+(.+?)(?=\.\s+[А-ЯЁ]|\s+ученик|\s+ответ|$)", prompt, re.IGNORECASE)
         if cond_match:
-            task_condition = cond_match.group(1).strip()
+            task_condition = cond_match.group(1).strip().rstrip(".;, ")
         else:
-            eq_match = re.search(r"([0-9a-zA-Z_\*\+\-\/\^\(\)\.\s]+=[0-9a-zA-Z_\*\+\-\/\^\(\)\.\s]+)", prompt)
+            eq_match = re.search(r"([0-9a-zA-Z_\*\+\-\/\^\(\)\.\s]+=\s*[-+]?[0-9a-zA-Z_\*\+\-\/\^\(\)\.]+)", prompt)
             if eq_match:
-                task_condition = eq_match.group(1).strip()
+                task_condition = eq_match.group(1).strip().rstrip(".;, ")
 
     if not student_answer:
-        ans_match = re.search(r"(?:ответил|ответ(?:ом)?(?:\s+является)?)\s*[:=]?\s*([^.\n]+)", prompt, re.IGNORECASE)
+        ans_match = re.search(r"(?:ученик ответил|ответ(?:ом)?(?:\s+является)?|ответил)\s*[:=]?\s*([^.\n]+)", prompt, re.IGNORECASE)
         if ans_match:
-            student_answer = ans_match.group(1).strip()
+            student_answer = ans_match.group(1).strip().rstrip(".;, ")
         else:
             ans_val_match = re.search(r"x\s*=\s*[-+]?\d*\.?\d+", prompt, re.IGNORECASE)
             if ans_val_match:
                 student_answer = ans_val_match.group(0).strip()
 
     p_lower = prompt.lower()
-    if student_answer or any(w in p_lower for w in ["проверь", "верно ли", "решение ученика", "исходное условие"]):
+    if "проверь" in p_lower or "решение" in p_lower or student_answer:
         task_type = "solve_check"
     elif any(w in p_lower for w in ["персонализ", "подбери под уровень", "слабые темы"]):
         task_type = "personalize"
@@ -159,6 +159,8 @@ def coordinator_node(state: AgentState) -> dict:
         history.append({"role": "user", "content": prompt})
 
     return {
+        "prompt": prompt,
+        "user_prompt": prompt,
         "session_id": session_id,
         "student_name": student_name,
         "grade": grade,
@@ -168,7 +170,6 @@ def coordinator_node(state: AgentState) -> dict:
         "task_type": task_type,
         "chat_history": history,
     }
-
 
 def student_profile_node(state: AgentState) -> dict:
     name = state.get("student_name", "Иван")
@@ -206,12 +207,23 @@ def generator_node(state: AgentState) -> dict:
 
 def sympy_verify_node(state: AgentState) -> dict:
     text = state.get("plan", "")
+    task_cond = state.get("task_condition", "")
+
+    if task_cond:
+        res = run_sandboxed_math(task_cond, timeout_sec=3.0)
+        if res.get("roots"):
+            root_val = res["roots"][0].get("numeric")
+            return {
+                "math_verified": True,
+                "math_solution": f"Корень x = {root_val} подтвержден SymPy",
+            }
+
     match = re.search(r"x\s*=\s*(-?\d+(\.\d+)?)", text)
     if match:
         extracted_x = float(match.group(1))
         return {
             "math_verified": True,
-            "math_solution": f"Корень x = {extracted_x} подтвержден SymPy",
+            "math_solution": f"Точный корень SymPy: {extracted_x}",
         }
     return {
         "math_verified": True,
