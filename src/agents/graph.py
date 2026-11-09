@@ -100,50 +100,38 @@ class AgentState(TypedDict):
 
 
 def coordinator_node(state: AgentState) -> dict:
-    prompt_text = state["user_prompt"]
+    prompt = state.get("user_prompt", "")
 
-    if "ИСХОДНОЕ УСЛОВИЕ:" in prompt_text and "РЕШЕНИЕ УЧЕНИКА:" in prompt_text:
-        try:
-            cond_part = prompt_text.split("ИСХОДНОЕ УСЛОВИЕ:")[1].split("РЕШЕНИЕ УЧЕНИКА:")[0].strip()
-            ans_part = prompt_text.split("РЕШЕНИЕ УЧЕНИКА:")[1].split("\n")[0].strip()
-            return {
-                "student_name": "Ученик",
-                "task_type": "solve_check",
-                "grade": 7,
-                "topic": "Математика",
-                "task_condition": cond_part,
-                "student_answer": ans_part,
-            }
-        except Exception:
-            pass
+    task_condition = prompt
+    student_answer = ""
 
-    prompt = (
-        f"Ты координатор TutorFlow AI. Проанализируй запрос: '{prompt_text}'  "
-        "Определи поля в формате JSON: "
-        "student_name, task_type ('lesson_plan' или 'solve_check'), "
-        "grade (5-9), topic, task_condition, student_answer. Без Markdown"
-    )
-    raw = query_ollama(model="llama3.2:3b", prompt=prompt, num_predict=140)
+    if "ИСХОДНОЕ УСЛОВИЕ:" in prompt and "РЕШЕНИЕ УЧЕНИКА:" in prompt:
+        parts = prompt.split("РЕШЕНИЕ УЧЕНИКА:")
+        cond_part = parts[0].split("ИСХОДНОЕ УСЛОВИЕ:")[-1]
+        task_condition = cond_part.strip().split("\n")[0].strip()
 
-    data = {}
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if match:
-        try:
-            data = json.loads(match.group(0))
-        except Exception:
-            pass
+        ans_part = parts[1]
+        for stop_word in ["Исходным условием", "Определи правильность", "\n\n"]:
+            if stop_word in ans_part:
+                ans_part = ans_part.split(stop_word)[0]
+        student_answer = ans_part.strip()
 
-    task_type = data.get("task_type") or (
-        "solve_check" if any(w in prompt_text.lower() for w in ["проверь", "ответ", "решил"]) else "lesson_plan")
+    p_lower = prompt.lower()
+    if student_answer or any(w in p_lower for w in ["проверь", "верно ли", "решение ученика", "исходное условие"]):
+        task_type = "solve_check"
+    elif any(w in p_lower for w in ["бомба", "взлом", "политика", "напиши код на c++"]):
+        task_type = "safety"
+    elif any(w in p_lower for w in ["реши", "найди корень", "вычисли", "сколько будет"]):
+        task_type = "solve_math"
+    else:
+        task_type = "pedagogical"
 
-    condition = data.get("task_condition") or prompt_text
     return {
-        "student_name": data.get("student_name") or "Ученик",
         "task_type": task_type,
-        "grade": int(data.get("grade") or 7),
-        "topic": data.get("topic") or "Алгебра",
-        "task_condition": str(condition),
-        "student_answer": data.get("student_answer") or prompt_text,
+        "topic": "Математика",
+        "grade": 7,
+        "task_condition": task_condition,
+        "student_answer": student_answer,
     }
 
 
@@ -354,6 +342,76 @@ def validator_node(state: AgentState) -> dict:
         status = "APPROVED" if "APPROVED" in raw.upper() else "NEEDS_REVIEW"
         return {"validation_status": status}
 
+def solver_agent_node(state: AgentState) -> dict:
+    task = state.get("task_condition") or state.get("user_prompt", "")
+    grade = state.get("grade", 7)
+    topic = state.get("topic", "Алгебра")
+
+    math_res = run_sandboxed_math(task, variable="x", timeout_sec=3.0)
+    details = math_res.get("details", {})
+    roots = math_res.get("roots", [])
+
+    if math_res.get("status") == "success":
+        if details.get("type") == "inequality":
+            solution_summary = (
+                f"Решение неравенства: {details.get('solution_str')}"
+            )
+        elif roots:
+            roots_str = ", ".join(str(r["symbolic"]) for r in roots)
+            solution_summary = f"Точные корни уравнения: {roots_str}"
+        else:
+            solution_summary = (
+                "Уравнение не имеет действительных корней (пустое множество)"
+            )
+    else:
+        solution_summary = (
+            "Символьный расчет недоступен, требуется текстовый разбор"
+        )
+
+    prompt = (
+        f"Ты опытный репетитор по математике для {grade} класса\n"
+        f"Тема: {topic}.\n"
+        f"Задача: {task}\n"
+        f"Точный математический ответ: {solution_summary}\n\n"
+        "Сформируй понятное пошаговое решение:\n"
+        "1. Краткое рассуждение и ключевая формула\n"
+        "2. Пошаговые действия\n"
+        "3. Четко выделенный итоговый ответ (Ответ: ...)\n"
+        "Пиши доступно, без лишней воды"
+    )
+
+    explanation = query_ollama(
+        model="llama3.2:3b", prompt=prompt, num_predict=250, temperature=0.2
+    )
+
+    return {
+        "math_solution": solution_summary,
+        "plan": explanation,
+        "final_output": explanation,
+    }
+
+def safety_node(state: AgentState) -> dict:
+    prompt = state.get("user_prompt", "")
+
+    system_msg = (
+        "Ты виртуальный помощник репетитора по математике 5-9 классов TutorFlow AI\n"
+        "Пользователь задал вопрос не по теме математики или нарушающий границы репетиторства\n"
+        f"Запрос пользователя: '{prompt}'\n\n"
+        "Инструкция:\n"
+        "1. Вежливо и кратко откажись отвечать на нерелевантную тему\n"
+        "2. Напомни, что ты специализируешься исключительно на школьной алгебре и геометрии 5–9 классов\n"
+        "3. Предложи разобрать математическую задачу или тему урока (1-2 предложения)"
+    )
+
+    response = query_ollama(
+        model="llama3.2:3b", prompt=system_msg, num_predict=80, temperature=0.1
+    )
+
+    return {
+        "validation_status": "APPROVED",
+        "final_output": response,
+        "feedback": "Запрос обработан фильтром безопасности / оффтопа",
+    }
 
 def save_db_node(state: AgentState) -> dict:
     student_id = state.get("student_id")
@@ -385,9 +443,14 @@ def save_db_node(state: AgentState) -> dict:
 
 
 def route_task(state: AgentState) -> str:
-    if state.get("task_type") == "solve_check":
+    tt = state.get("task_type")
+    if tt == "solve_check":
         return "solution_checker"
-    return "generator"
+    elif tt == "solve_math":
+        return "solver_agent"
+    elif tt == "safety":
+        return "safety_node"
+    return "pedagogical_generator"
 
 
 def build_tutor_graph():
@@ -397,6 +460,8 @@ def build_tutor_graph():
     workflow.add_node("coordinator", coordinator_node)
     workflow.add_node("student_profile", student_profile_node)
     workflow.add_node("generator", generator_node)
+    workflow.add_node("solver_agent", solver_agent_node)  # Новый узел
+    workflow.add_node("safety_node", safety_node)  # Новый узел
     workflow.add_node("math_sandbox", sympy_verify_node)
     workflow.add_node("solution_checker", solution_checker_node)
     workflow.add_node("validator", validator_node)
@@ -408,13 +473,20 @@ def build_tutor_graph():
     workflow.add_conditional_edges(
         "student_profile",
         route_task,
-        {"generator": "generator", "solution_checker": "solution_checker"},
+        {
+            "solution_checker": "solution_checker",
+            "solver_agent": "solver_agent",
+            "pedagogical_generator": "generator",
+            "safety_node": "safety_node",
+        },
     )
 
+    workflow.add_edge("solution_checker", "validator")
+    workflow.add_edge("solver_agent", "validator")
     workflow.add_edge("generator", "math_sandbox")
     workflow.add_edge("math_sandbox", "validator")
-    workflow.add_edge("solution_checker", "validator")
 
+    workflow.add_edge("safety_node", "save_db")
     workflow.add_edge("validator", "save_db")
     workflow.add_edge("save_db", END)
 
