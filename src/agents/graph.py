@@ -113,10 +113,11 @@ class AgentState(TypedDict):
 def coordinator_node(state: AgentState) -> dict:
     prompt = state.get("user_prompt", "")
 
-    coordinator_spec = load_prompt("coordinator.md")
     session_id = state.get("session_id") or "default_session"
     history = get_session_history(session_id, limit=4)
     save_session_message(session_id, "user", state.get("user_prompt", ""))
+
+    coordinator_spec = load_prompt("coordinator.md")
 
     task_condition = prompt
     student_answer = ""
@@ -131,6 +132,13 @@ def coordinator_node(state: AgentState) -> dict:
             if stop_word in ans_part:
                 ans_part = ans_part.split(stop_word)[0]
         student_answer = ans_part.strip()
+    else:
+        ans_match = re.search(r"(?:ученик ответил|ответ(?:ил)?|получил)\s*[:\-—]?\s*(.*)", prompt, re.IGNORECASE)
+        if ans_match:
+            student_answer = ans_match.group(1).strip()
+            cond_match = re.search(r"(?:по задаче|уравнение|задач[уе])\s*[:\-—]?\s*([^.]+)", prompt, re.IGNORECASE)
+            if cond_match:
+                task_condition = cond_match.group(1).strip()
 
     p_lower = prompt.lower()
     if student_answer or any(w in p_lower for w in ["проверь", "верно ли", "решение ученика", "исходное условие"]):
@@ -141,7 +149,7 @@ def coordinator_node(state: AgentState) -> dict:
         task_type = "solve_math"
     else:
         try:
-            sys_prompt = f"{coordinator_spec}\n\nЗапрос пользователя: {prompt}\nВерни JSON:"
+            sys_prompt = f"{coordinator_spec}\n\nЗапрос: {prompt}\nВерни JSON c полем task_type:"
             raw = query_ollama(model="qwen2.5:3b", prompt=sys_prompt, num_predict=60, temperature=0.0)
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
@@ -153,13 +161,13 @@ def coordinator_node(state: AgentState) -> dict:
             task_type = "pedagogical"
 
     return {
+        "session_id": session_id,
+        "chat_history": history,
         "task_type": task_type,
         "topic": "Математика",
         "grade": 7,
         "task_condition": task_condition,
         "student_answer": student_answer,
-        "session_id": session_id,
-        "chat_history": history,
     }
 
 
