@@ -30,7 +30,6 @@ def format_prompt(record):
 
 
 def stream_generate(base_url, model, prompt, timeout, seed, num_predict, qwen_no_think=False, warmup=False):
-    # Use /api/chat, matching the manually tested API, not /api/generate.
     request_prompt = ('/no_think\n' + prompt) if qwen_no_think and 'qwen3' in model.lower() else prompt
     payload = {
         'model': model,
@@ -73,7 +72,6 @@ def stream_generate(base_url, model, prompt, timeout, seed, num_predict, qwen_no
     answer = ''.join(pieces)
     thinking = ''.join(thinking_pieces)
     leaked_thinking = bool(re.search(r'</?think>', answer, flags=re.IGNORECASE))
-    # Preserve the raw answer for auditability. This extraction is for inspection only.
     user_facing_answer = re.split(r'</think>', answer, flags=re.IGNORECASE)[-1].strip() if leaked_thinking and '</think>' in answer.lower() else answer.strip()
     eval_dur = last.get('eval_duration') or 0
     eval_count = last.get('eval_count') or 0
