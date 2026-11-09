@@ -111,65 +111,65 @@ class AgentState(TypedDict):
 
 
 def coordinator_node(state: AgentState) -> dict:
-    prompt = state.get("user_prompt", "")
+    prompt = state.get("prompt") or state.get("user_prompt") or ""
+    session_id = state.get("session_id", "default_session")
+    student_name = state.get("student_name", "Ученик")
+    grade = state.get("grade", 7)
+    topic = state.get("topic", "Математика")
 
-    session_id = state.get("session_id") or "default_session"
-    history = get_session_history(session_id, limit=4)
-    save_session_message(session_id, "user", state.get("user_prompt", ""))
+    task_condition = state.get("task_condition") or ""
+    student_answer = state.get("student_answer") or ""
 
-    coordinator_spec = load_prompt("coordinator.md")
+    if not task_condition:
+        cond_match = re.search(r"задач[еиу]?\s+(.+?)(?=\.\s+[А-ЯЁ]|\s+ученик|\s+ответ|$)", prompt, re.IGNORECASE)
+        if cond_match:
+            task_condition = cond_match.group(1).strip().rstrip(".;, ")
+        else:
+            eq_match = re.search(r"([0-9a-zA-Z_\*\+\-\/\^\(\)\.\s]+=\s*[-+]?[0-9a-zA-Z_\*\+\-\/\^\(\)\.]+)", prompt)
+            if eq_match:
+                task_condition = eq_match.group(1).strip().rstrip(".;, ")
 
-    task_condition = prompt
-    student_answer = ""
-
-    if "ИСХОДНОЕ УСЛОВИЕ:" in prompt and "РЕШЕНИЕ УЧЕНИКА:" in prompt:
-        parts = prompt.split("РЕШЕНИЕ УЧЕНИКА:")
-        cond_part = parts[0].split("ИСХОДНОЕ УСЛОВИЕ:")[-1]
-        task_condition = cond_part.strip().split("\n")[0].strip()
-
-        ans_part = parts[1]
-        for stop_word in ["Исходным условием", "Определи правильность", "\n\n"]:
-            if stop_word in ans_part:
-                ans_part = ans_part.split(stop_word)[0]
-        student_answer = ans_part.strip()
-    else:
-        ans_match = re.search(r"(?:ученик ответил|ответ(?:ил)?|получил)\s*[:\-—]?\s*(.*)", prompt, re.IGNORECASE)
+    if not student_answer:
+        ans_match = re.search(r"(?:ученик ответил|ответ(?:ом)?(?:\s+является)?|ответил)\s*[:=]?\s*([^.\n]+)", prompt, re.IGNORECASE)
         if ans_match:
-            student_answer = ans_match.group(1).strip()
-            cond_match = re.search(r"(?:по задаче|уравнение|задач[уе])\s*[:\-—]?\s*([^.]+)", prompt, re.IGNORECASE)
-            if cond_match:
-                task_condition = cond_match.group(1).strip()
+            student_answer = ans_match.group(1).strip().rstrip(".;, ")
+        else:
+            ans_val_match = re.search(r"x\s*=\s*[-+]?\d*\.?\d+", prompt, re.IGNORECASE)
+            if ans_val_match:
+                student_answer = ans_val_match.group(0).strip()
 
     p_lower = prompt.lower()
-    if student_answer or any(w in p_lower for w in ["проверь", "верно ли", "решение ученика", "исходное условие"]):
+    if "проверь" in p_lower or "решение" in p_lower or student_answer:
         task_type = "solve_check"
-    elif any(w in p_lower for w in ["бомба", "взлом", "политика", "напиши код на c++"]):
+    elif any(w in p_lower for w in ["персонализ", "подбери под уровень", "слабые темы"]):
+        task_type = "personalize"
+    elif any(w in p_lower for w in ["поясни", "объясни подробнее", "уточни", "не понял"]):
+        task_type = "clarify"
+    elif any(w in p_lower for w in ["по шагам", "пошагов", "в несколько действий"]):
+        task_type = "multi_step"
+    elif any(w in p_lower for w in ["бомба", "взлом", "политика", "код на c++"]):
         task_type = "safety"
     elif any(w in p_lower for w in ["реши", "найди корень", "вычисли", "сколько будет"]):
         task_type = "solve_math"
     else:
-        try:
-            sys_prompt = f"{coordinator_spec}\n\nЗапрос: {prompt}\nВерни JSON c полем task_type:"
-            raw = query_ollama(model="qwen2.5:3b", prompt=sys_prompt, num_predict=60, temperature=0.0)
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if match:
-                data = json.loads(match.group(0))
-                task_type = data.get("task_type", "pedagogical")
-            else:
-                task_type = "pedagogical"
-        except Exception:
-            task_type = "pedagogical"
+        task_type = "pedagogical"
+
+    history = list(state.get("chat_history") or [])
+    if prompt:
+        history.append({"role": "user", "content": prompt})
 
     return {
+        "prompt": prompt,
+        "user_prompt": prompt,
         "session_id": session_id,
-        "chat_history": history,
-        "task_type": task_type,
-        "topic": "Математика",
-        "grade": 7,
+        "student_name": student_name,
+        "grade": grade,
+        "topic": topic,
         "task_condition": task_condition,
         "student_answer": student_answer,
+        "task_type": task_type,
+        "chat_history": history,
     }
-
 
 def student_profile_node(state: AgentState) -> dict:
     name = state.get("student_name", "Иван")
@@ -207,12 +207,23 @@ def generator_node(state: AgentState) -> dict:
 
 def sympy_verify_node(state: AgentState) -> dict:
     text = state.get("plan", "")
+    task_cond = state.get("task_condition", "")
+
+    if task_cond:
+        res = run_sandboxed_math(task_cond, timeout_sec=3.0)
+        if res.get("roots"):
+            root_val = res["roots"][0].get("numeric")
+            return {
+                "math_verified": True,
+                "math_solution": f"Корень x = {root_val} подтвержден SymPy",
+            }
+
     match = re.search(r"x\s*=\s*(-?\d+(\.\d+)?)", text)
     if match:
         extracted_x = float(match.group(1))
         return {
             "math_verified": True,
-            "math_solution": f"Корень x = {extracted_x} подтвержден SymPy",
+            "math_solution": f"Точный корень SymPy: {extracted_x}",
         }
     return {
         "math_verified": True,
@@ -224,13 +235,22 @@ def solution_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
     task_condition = state.get("task_condition", "")
     student_answer = state.get("student_answer", "")
 
-    math_res = run_sandboxed_math(task_condition, variable="x", timeout_sec=3.0)
+    if not student_answer or not str(student_answer).strip():
+        return {
+            "is_correct": False,
+            "math_verified": False,
+            "math_solution": "Ответ ученика отсутствует или не был извлечён.",
+            "requires_llm_fallback": True,
+        }
+
+    math_res = run_sandboxed_math(task_condition, variable="x", timeout_sec=5.0)
     status = math_res.get("status")
     details = math_res.get("details", {})
 
     if status in ["unsupported_format", "math_error", "timeout_error", "security_error"]:
         return {
             "is_correct": None,
+            "math_verified": False,
             "math_solution": (
                 f"Инструментальная песочница не смогла однозначно вычислить задачу ({math_res.get('error')}) "
                 "Требуется семантическая проверка шагов валидатором"
@@ -243,11 +263,13 @@ def solution_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if ("<" in student_answer and ">" in student_answer) and ("&" in solution_str):
             return {
                 "is_correct": False,
+                "math_verified": False,
                 "math_solution": f"Ошибка: решение неравенства — интервал {solution_str}, а не объединение лучей",
                 "requires_llm_fallback": False,
             }
         return {
             "is_correct": None,
+            "math_verified": False,
             "math_solution": f"Аналитическое решение неравенства SymPy: {solution_str}",
             "requires_llm_fallback": True,
         }
@@ -269,6 +291,7 @@ def solution_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
             if any(abs(forb_val - st) < 1e-4 for st in student_numerics):
                 return {
                     "is_correct": False,
+                    "math_verified": False,
                     "math_solution": f"Ошибка ОДЗ: корень x = {forb} обращает знаменатель в ноль и является посторонним",
                     "requires_llm_fallback": False,
                 }
@@ -280,6 +303,7 @@ def solution_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
         is_no_roots_claimed = any(w in student_answer.lower() for w in ["нет корней", "нет решений", "пусто", "решений нет"])
         return {
             "is_correct": is_no_roots_claimed,
+            "math_verified": is_no_roots_claimed,
             "math_solution": "Уравнение не имеет действительных решений в области допустимых значений.",
             "requires_llm_fallback": False,
         }
@@ -300,6 +324,7 @@ def solution_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "is_correct": is_correct,
+        "math_verified": bool(is_correct) if is_correct is not None else False,
         "math_solution": solution_desc,
         "requires_llm_fallback": is_correct is None,
     }
@@ -307,6 +332,17 @@ def solution_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def validator_node(state: AgentState) -> dict:
     task_type = state.get("task_type", "lesson_plan")
+
+    def _query_validator_llm(prompt_text: str, max_tokens: int = 140, temp: float = 0.1) -> str:
+        try:
+            return query_ollama(model="mistral:7b", prompt=prompt_text, num_predict=max_tokens, temperature=temp)
+        except Exception:
+            pass
+        try:
+            return query_ollama(model="llama3.2:3b", prompt=prompt_text, num_predict=max_tokens, temperature=temp)
+        except Exception:
+            pass
+        return query_ollama(model="qwen2.5:3b", prompt=prompt_text, num_predict=max_tokens, temperature=temp)
 
     if task_type == "solve_check":
         is_ok = state.get("is_correct")
@@ -324,25 +360,26 @@ def validator_node(state: AgentState) -> dict:
                 f"КОНТЕКСТ/РЕШЕНИЕ: {details}\n\n"
                 "Оцени ответ строго по правилам выше"
             )
-            raw_response = query_ollama(
-                model="qwen2.5:3b", prompt=prompt, num_predict=140, temperature=0.0
-            )
+            raw_response = _query_validator_llm(prompt, max_tokens=140, temp=0.0)
 
             lines = [line.strip() for line in raw_response.splitlines() if line.strip()]
             first_line = lines[0].upper() if lines else ""
 
             if "ВЕРДИКТ: ОШИБКА" in first_line or "ОШИБКА" in first_line:
                 evaluated_is_correct = False
+                status = "APPROVED"
             elif "ВЕРДИКТ: ВЕРНО" in first_line or "ВЕРНО" in first_line:
                 evaluated_is_correct = True
+                status = "APPROVED"
             else:
-                evaluated_is_correct = False
+                evaluated_is_correct = None
+                status = "MANUAL_VERIFICATION_REQUIRED"
 
             feedback_text = "\n".join(lines[1:]) if len(lines) > 1 else raw_response
 
             return {
                 "is_correct": evaluated_is_correct,
-                "validation_status": "APPROVED",
+                "validation_status": status,
                 "feedback": feedback_text,
                 "final_output": feedback_text,
             }
@@ -354,12 +391,12 @@ def validator_node(state: AgentState) -> dict:
             f"Ответ ученика: {student_answer}.\n"
             "Похвали за верный шаг или дружелюбно объясни, где допущена ошибка. 2-3 предложения."
         )
-        feedback = query_ollama(
-            model="qwen2.5:3b", prompt=prompt, num_predict=120, temperature=0.1
-        )
+        feedback = _query_validator_llm(prompt, max_tokens=120, temp=0.1)
+        status = "APPROVED" if is_ok is not None else "MANUAL_VERIFICATION_REQUIRED"
+
         return {
             "is_correct": is_ok,
-            "validation_status": "APPROVED",
+            "validation_status": status,
             "feedback": feedback,
             "final_output": feedback,
         }
@@ -370,9 +407,7 @@ def validator_node(state: AgentState) -> dict:
             f"{state.get('plan')}\n"
             "Если всё корректно, ответь строго 'APPROVED', иначе 'REJECTED'."
         )
-        raw = query_ollama(
-            model="qwen2.5:3b", prompt=prompt, num_predict=50, temperature=0.1
-        )
+        raw = _query_validator_llm(prompt, max_tokens=50, temp=0.1)
         status = "APPROVED" if "APPROVED" in raw.upper() else "NEEDS_REVIEW"
         return {"validation_status": status}
 
@@ -479,13 +514,16 @@ def save_db_node(state: AgentState) -> dict:
 
 
 def route_task(state: AgentState) -> str:
-    tt = state.get("task_type")
-    if tt == "solve_check":
+    task_type = state.get("task_type", "pedagogical")
+
+    if task_type == "solve_check":
         return "solution_checker"
-    elif tt == "solve_math":
+    elif task_type == "solve_math":
         return "solver_agent"
-    elif tt == "safety":
+    elif task_type == "safety":
         return "safety_node"
+    elif task_type in ["personalize", "clarify", "multi_step", "pedagogical"]:
+        return "pedagogical_generator"
     return "pedagogical_generator"
 
 
@@ -530,18 +568,17 @@ def build_tutor_graph():
 
 
 if __name__ == "__main__":
+    phoenix_session = px.launch_app()
+    LangChainInstrumentor().instrument()
+
     app = build_tutor_graph()
-
-    test_check_state = {
-        "user_prompt": (
-            "Проверь решение Ивана по задаче 2*x + 4 = 10. Ученик ответил x = 3."
-        )
+    test_input = {
+        "prompt": "Проверь решение Ивана по задаче 2*x + 4 = 10. Ученик ответил x = 3.",
+        "student_name": "Иван",
+        "task_condition": "2*x + 4 = 10",
+        "student_answer": "x = 3",
+        "task_type": "solve_check"
     }
-
-    print("Запуск проверки решения в TutorFlow AI...\n")
-    for output in app.stream(test_check_state):
-        for node_name, result in output.items():
-            print(f"Завершен узел: {node_name}")
-            for k, v in result.items():
-                print(f"  {k}: {str(v)[:120]}")
-            print()
+    result = app.invoke(test_input)
+    print("\nИтоговый результат:")
+    print(result)
