@@ -15,40 +15,49 @@ def init_db() -> None:
   with get_connection() as conn:
     cursor = conn.cursor()
     cursor.execute("""
-            CREATE TABLE IF NOT EXISTS students (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                grade INTEGER NOT NULL,
-                level TEXT DEFAULT 'средний',
-                weak_topics TEXT DEFAULT '',
-                notes TEXT DEFAULT ''
-            )
-        """)
+        CREATE TABLE IF NOT EXISTS students (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            grade INTEGER NOT NULL,
+            level TEXT DEFAULT 'средний',
+            weak_topics TEXT DEFAULT '',
+            notes TEXT DEFAULT ''
+        )
+    """)
     cursor.execute("""
-            CREATE TABLE IF NOT EXISTS lessons (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                student_id INTEGER,
-                topic TEXT NOT NULL,
-                plan_text TEXT NOT NULL,
-                math_solution TEXT,
-                validation_status TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (student_id) REFERENCES students(id)
-            )
-        """)
+        CREATE TABLE IF NOT EXISTS lessons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER,
+            topic TEXT NOT NULL,
+            plan_text TEXT NOT NULL,
+            math_solution TEXT,
+            validation_status TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (student_id) REFERENCES students(id)
+        )
+    """)
     cursor.execute("""
-            CREATE TABLE IF NOT EXISTS assignments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                student_id INTEGER,
-                topic TEXT NOT NULL,
-                task_text TEXT NOT NULL,
-                student_solution TEXT,
-                verdict TEXT,
-                is_correct BOOLEAN,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (student_id) REFERENCES students(id)
-            )
-        """)
+        CREATE TABLE IF NOT EXISTS assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER,
+            topic TEXT NOT NULL,
+            task_text TEXT NOT NULL,
+            student_solution TEXT,
+            verdict TEXT,
+            is_correct BOOLEAN,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (student_id) REFERENCES students(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
 
 
@@ -123,6 +132,24 @@ def save_assignment_result(
     conn.commit()
     return cursor.lastrowid
 
+def save_session_message(session_id: str, role: str, content: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO session_messages (session_id, role, content) VALUES (?, ?, ?)",
+        (session_id, role, content)
+    )
+    conn.commit()
+
+def get_session_history(session_id: str, limit: int = 5) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT role, content FROM session_messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+        (session_id, limit)
+    )
+    rows = cursor.fetchall()
+    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 if __name__ == "__main__":
   init_db()
