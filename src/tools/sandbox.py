@@ -1,4 +1,4 @@
-import concurrent.futures
+import multiprocessing
 import re
 from typing import Any, Dict, List, Optional
 import sympy as sp
@@ -154,44 +154,60 @@ def _solve_equation_worker(raw_input: str, variable: str = "x") -> Dict[str, Any
             }
         raise e
 
+def _mp_worker(eq_str: str, variable: str, queue: multiprocessing.Queue):
+    try:
+        res = _solve_equation_worker(eq_str, variable)
+        queue.put({"ok": True, "res": res})
+    except MathSecurityError as e:
+        queue.put({"ok": False, "type": "security_error", "error": str(e)})
+    except Exception as e:
+        queue.put({"ok": False, "type": "math_error", "error": f"Ошибка парсинга/вычисления: {str(e)}"})
 
 def run_sandboxed_math(
         eq_str: str, variable: str = "x", timeout_sec: float = 3.0
 ) -> Dict[str, Any]:
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_solve_equation_worker, eq_str, variable)
-            res = future.result(timeout=timeout_sec)
+    queue = multiprocessing.Queue()
+    proc = multiprocessing.Process(target=_mp_worker, args=(eq_str, variable, queue))
+    proc.start()
+    proc.join(timeout=timeout_sec)
 
-            if res.get("type") == "unsupported_format":
-                return {
-                    "status": "unsupported_format",
-                    "roots": [],
-                    "details": res,
-                    "error": "Инструмент не поддерживает текстовый формат задачи; требуется обработка LLM-валидатором",
-                }
-
-            return {
-                "status": "success",
-                "roots": res.get("roots", []),
-                "details": res,
-                "error": None,
-            }
-    except concurrent.futures.TimeoutError:
+    if proc.is_alive():
+        proc.terminate()
+        proc.kill()
+        proc.join()
         return {
             "status": "timeout_error",
             "roots": [],
             "error": f"Превышен лимит времени вычисления ({timeout_sec} сек)",
         }
-    except MathSecurityError as e:
+
+    if not queue.empty():
+        payload = queue.get()
+        if not payload.get("ok"):
+            return {
+                "status": payload.get("type", "math_error"),
+                "roots": [],
+                "error": payload.get("error"),
+            }
+
+        res = payload.get("res", {})
+        if res.get("type") == "unsupported_format":
+            return {
+                "status": "unsupported_format",
+                "roots": [],
+                "details": res,
+                "error": "Инструмент не поддерживает текстовый формат задачи; требуется обработка LLM-валидатором",
+            }
+
         return {
-            "status": "security_error",
-            "roots": [],
-            "error": str(e),
+            "status": "success",
+            "roots": res.get("roots", []),
+            "details": res,
+            "error": None,
         }
-    except Exception as e:
-        return {
-            "status": "math_error",
-            "roots": [],
-            "error": f"Ошибка парсинга/вычисления: {str(e)}",
-        }
+
+    return {
+        "status": "math_error",
+        "roots": [],
+        "error": "Процесс песочницы завершился аварийно без ответа",
+    }
