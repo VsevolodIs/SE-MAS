@@ -39,14 +39,11 @@ def pick_files(folder):
 
 
 def user_answer(row):
-    # The benchmark writes this field for Qwen's post-thinking content.
-    # Retain the raw answer elsewhere for audit.
     value = row.get('user_facing_answer')
     return value if isinstance(value, str) and value.strip() else (row.get('answer') or '')
 
 
 def terminal_text(answer):
-    # Try an explicit answer label before falling back to last line.
     matches = list(re.finditer(r'(?:ответ\s*[:：]|\*\*ответ\*\*\s*[:：]?)', answer, re.I))
     if matches:
         return answer[matches[-1].end():].strip()[:300]
@@ -56,7 +53,6 @@ def terminal_text(answer):
 
 def numbers(text):
     text = text.replace('−', '-').replace('–', '-').replace(',', '.')
-    # Fractions and decimals, including negative numbers, outside words.
     values = []
     for match in re.finditer(r'(?<![\w])(-?\d+(?:\.\d+)?(?:\s*/\s*\d+)?)(?![\w])', text):
         try:
@@ -78,7 +74,6 @@ def eq(a, b):
 
 
 def variable_assignments(text):
-    # Match x = 3, x₁ = 2, х = 4, and y = 3. Works for Cyrillic х as well.
     text = text.replace('−', '-').replace('₁', '1').replace('₂', '2')
     out = defaultdict(list)
     for m in re.finditer(r'(?<![\w])([xyх])\s*[12]?\s*=\s*(-?\d+(?:[.,]\d+)?)', text, re.I):

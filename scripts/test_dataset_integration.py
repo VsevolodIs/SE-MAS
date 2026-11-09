@@ -25,9 +25,6 @@ FIELDS = [
     "is_correct", "feedback", "math_solution", "error",
 ]
 
-# Explicit, reviewed fixtures for the seven check_solution tasks.
-# The currently running API expects {"prompt": ...}, not {"problem", "student_solution"}.
-# Review fixture wording against benchmarks/dataset.jsonl before interpreting results.
 CHECK_SOLUTION_PAYLOADS = {
     "TF-020": {
         "problem": "2(x+3)=14",
@@ -167,8 +164,6 @@ def main():
                 item["status"] = "missing_payload"
                 item["error"] = "No reviewed payload for this test ID; request not sent"
             else:
-                # The API takes a single prompt. Keep the original condition distinct
-                # from the student's working so the coordinator has less ambiguity.
                 payload = {
                     "prompt": (
                         "Проверь решение ученика по математике.\n"
