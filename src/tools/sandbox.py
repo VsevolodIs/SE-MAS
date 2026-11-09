@@ -144,13 +144,15 @@ def _solve_equation_worker(raw_input: str, variable: str = "x") -> Dict[str, Any
             "solution_str": str(val),
             "domain_valid": True,
         }
-    except Exception:
-        return {
-            "type": "unsupported_format",
-            "roots": [],
-            "solution_str": None,
-            "domain_valid": True,
-        }
+    except Exception as e:
+        if re.search(r"[а-яА-ЯёЁ]", raw_input):
+            return {
+                "type": "unsupported_format",
+                "roots": [],
+                "solution_str": None,
+                "domain_valid": True,
+            }
+        raise e
 
 
 def run_sandboxed_math(
