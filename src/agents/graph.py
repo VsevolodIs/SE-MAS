@@ -12,8 +12,16 @@ from src.tools.sandbox import run_sandboxed_math
 import phoenix as px
 from openinference.instrumentation.langchain import LangChainInstrumentor
 
-_orig_cleanup = tempfile.TemporaryDirectory._cleanup
 
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+def load_prompt(filename: str) -> str:
+    prompt_path = PROMPTS_DIR / filename
+    if prompt_path.exists():
+        return prompt_path.read_text(encoding="utf-8").strip()
+    return ""
+
+_orig_cleanup = tempfile.TemporaryDirectory._cleanup
 
 @classmethod
 def _safe_cleanup(cls, *args, **kwargs):
@@ -102,6 +110,8 @@ class AgentState(TypedDict):
 def coordinator_node(state: AgentState) -> dict:
     prompt = state.get("user_prompt", "")
 
+    coordinator_spec = load_prompt("coordinator.md")
+
     task_condition = prompt
     student_answer = ""
 
@@ -124,7 +134,17 @@ def coordinator_node(state: AgentState) -> dict:
     elif any(w in p_lower for w in ["реши", "найди корень", "вычисли", "сколько будет"]):
         task_type = "solve_math"
     else:
-        task_type = "pedagogical"
+        try:
+            sys_prompt = f"{coordinator_spec}\n\nЗапрос пользователя: {prompt}\nВерни JSON:"
+            raw = query_ollama(model="qwen2.5:3b", prompt=sys_prompt, num_predict=60, temperature=0.0)
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+                task_type = data.get("task_type", "pedagogical")
+            else:
+                task_type = "pedagogical"
+        except Exception:
+            task_type = "pedagogical"
 
     return {
         "task_type": task_type,
@@ -280,15 +300,13 @@ def validator_node(state: AgentState) -> dict:
         requires_fallback = state.get("requires_llm_fallback", False)
 
         if requires_fallback or is_ok is None:
+            validator_spec = load_prompt("validator.md")
             prompt = (
-                "Ты эксперт-методист по математике. Твоя задача — строго оценить ответ ученика\n"
+                f"{validator_spec}\n\n"
                 f"УСЛОВИЕ ЗАДАЧИ: {task_condition}\n"
                 f"ОТВЕТ УЧЕНИКА: {student_answer}\n"
                 f"КОНТЕКСТ/РЕШЕНИЕ: {details}\n\n"
-                "ПРАВИЛО:\n"
-                "1. Если в геометрии нарушено неравенство треугольника (сумма двух сторон <= третьей) или ответ неверный — пиши строго: ВЕРДИКТ: ОШИБКА\n"
-                "2. Если ответ верный — пиши строго: ВЕРДИКТ: ВЕРНО\n"
-                "3. Со следующей строки дай краткий тактичный комментарий"
+                "Оцени ответ строго по правилам выше"
             )
             raw_response = query_ollama(
                 model="qwen2.5:3b", prompt=prompt, num_predict=140, temperature=0.0
@@ -368,16 +386,13 @@ def solver_agent_node(state: AgentState) -> dict:
             "Символьный расчет недоступен, требуется текстовый разбор"
         )
 
+    solver_spec = load_prompt("solver.md")
     prompt = (
-        f"Ты опытный репетитор по математике для {grade} класса\n"
-        f"Тема: {topic}.\n"
-        f"Задача: {task}\n"
+        f"{solver_spec}\n\n"
+        f"Тема: {topic}, класс: {grade}.\n"
+        f"Условие: {task}\n"
         f"Точный математический ответ: {solution_summary}\n\n"
-        "Сформируй понятное пошаговое решение:\n"
-        "1. Краткое рассуждение и ключевая формула\n"
-        "2. Пошаговые действия\n"
-        "3. Четко выделенный итоговый ответ (Ответ: ...)\n"
-        "Пиши доступно, без лишней воды"
+        "Сформируй понятное пошаговое решение ученику:"
     )
 
     explanation = query_ollama(
