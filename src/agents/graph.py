@@ -332,10 +332,12 @@ def validator_node(state: AgentState) -> dict:
         try:
             return query_ollama(model="mistral:7b", prompt=prompt_text, num_predict=max_tokens, temperature=temp)
         except Exception:
-            try:
-                return query_ollama(model="llama3.2:3b", prompt=prompt_text, num_predict=max_tokens, temperature=temp)
-            except Exception:
-                return query_ollama(model="qwen2.5:3b", prompt=prompt_text, num_predict=max_tokens, temperature=temp)
+            pass
+        try:
+            return query_ollama(model="llama3.2:3b", prompt=prompt_text, num_predict=max_tokens, temperature=temp)
+        except Exception:
+            pass
+        return query_ollama(model="qwen2.5:3b", prompt=prompt_text, num_predict=max_tokens, temperature=temp)
 
     if task_type == "solve_check":
         is_ok = state.get("is_correct")
@@ -360,13 +362,15 @@ def validator_node(state: AgentState) -> dict:
 
             if "ВЕРДИКТ: ОШИБКА" in first_line or "ОШИБКА" in first_line:
                 evaluated_is_correct = False
+                status = "APPROVED"
             elif "ВЕРДИКТ: ВЕРНО" in first_line or "ВЕРНО" in first_line:
                 evaluated_is_correct = True
+                status = "APPROVED"
             else:
-                evaluated_is_correct = False
+                evaluated_is_correct = None
+                status = "MANUAL_VERIFICATION_REQUIRED"
 
             feedback_text = "\n".join(lines[1:]) if len(lines) > 1 else raw_response
-            status = "APPROVED" if evaluated_is_correct else "NEEDS_REVIEW"
 
             return {
                 "is_correct": evaluated_is_correct,
@@ -383,7 +387,7 @@ def validator_node(state: AgentState) -> dict:
             "Похвали за верный шаг или дружелюбно объясни, где допущена ошибка. 2-3 предложения."
         )
         feedback = _query_validator_llm(prompt, max_tokens=120, temp=0.1)
-        status = "APPROVED" if is_ok else "NEEDS_REVIEW"
+        status = "APPROVED" if is_ok is not None else "MANUAL_VERIFICATION_REQUIRED"
 
         return {
             "is_correct": is_ok,
@@ -505,14 +509,18 @@ def save_db_node(state: AgentState) -> dict:
 
 
 def route_task(state: AgentState) -> str:
-    tt = state.get("task_type")
-    if tt == "solve_check":
+    task_type = state.get("task_type", "pedagogical")
+    if task_type == "solve_check":
         return "solution_checker"
-    elif tt == "solve_math":
-        return "solver_agent"
-    elif tt == "safety":
-        return "safety_node"
-    return "pedagogical_generator"
+    elif task_type == "solve_math":
+        return "solver"
+    elif task_type == "safety":
+        return "safety_guard"
+    elif task_type == "personalize":
+        return "personalize_node"
+    elif task_type in ["clarify", "multi_step"]:
+        return "explanation_node"
+    return "generator"
 
 
 def build_tutor_graph():

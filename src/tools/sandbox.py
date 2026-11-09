@@ -181,29 +181,27 @@ def run_sandboxed_math(
             "error": f"Превышен лимит времени вычисления ({timeout_sec} сек)",
         }
 
-    if not queue.empty():
-        payload = queue.get()
-        if not payload.get("ok"):
+    try:
+        if not queue.empty():
+            payload = queue.get_nowait()
+            if not payload.get("ok"):
+                return {
+                    "status": payload.get("type", "math_error"),
+                    "roots": [],
+                    "error": payload.get("error"),
+                }
+            res = payload.get("res", {})
             return {
-                "status": payload.get("type", "math_error"),
-                "roots": [],
-                "error": payload.get("error"),
-            }
-
-        res = payload.get("res", {})
-        if res.get("type") == "unsupported_format":
-            return {
-                "status": "unsupported_format",
-                "roots": [],
+                "status": "success",
+                "roots": res.get("roots", []),
                 "details": res,
-                "error": "Инструмент не поддерживает текстовый формат задачи; требуется обработка LLM-валидатором",
+                "error": None,
             }
-
+    except Exception as e:
         return {
-            "status": "success",
-            "roots": res.get("roots", []),
-            "details": res,
-            "error": None,
+            "status": "math_error",
+            "roots": [],
+            "error": f"Ошибка чтения очереди процесса: {e}",
         }
 
     return {
