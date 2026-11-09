@@ -11,6 +11,7 @@ import sympy as sp
 from src.tools.sandbox import run_sandboxed_math
 import phoenix as px
 from openinference.instrumentation.langchain import LangChainInstrumentor
+from src.database.db import get_session_history, save_session_message
 
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -87,6 +88,8 @@ def query_ollama(
 
 
 class AgentState(TypedDict):
+    session_id: Optional[str]
+    chat_history: Optional[list]
     user_prompt: str
     student_name: Optional[str]
     student_id: Optional[int]
@@ -111,6 +114,9 @@ def coordinator_node(state: AgentState) -> dict:
     prompt = state.get("user_prompt", "")
 
     coordinator_spec = load_prompt("coordinator.md")
+    session_id = state.get("session_id") or "default_session"
+    history = get_session_history(session_id, limit=4)
+    save_session_message(session_id, "user", state.get("user_prompt", ""))
 
     task_condition = prompt
     student_answer = ""
@@ -152,6 +158,8 @@ def coordinator_node(state: AgentState) -> dict:
         "grade": 7,
         "task_condition": task_condition,
         "student_answer": student_answer,
+        "session_id": session_id,
+        "chat_history": history,
     }
 
 
@@ -429,6 +437,11 @@ def safety_node(state: AgentState) -> dict:
     }
 
 def save_db_node(state: AgentState) -> dict:
+    session_id = state.get("session_id") or "default_session"
+    final_output = state.get("final_output") or state.get("feedback") or ""
+    if final_output:
+        save_session_message(session_id, "assistant", final_output)
+
     student_id = state.get("student_id")
     task_type = state.get("task_type", "lesson_plan")
     status = state.get("validation_status", "NEEDS_REVIEW")
