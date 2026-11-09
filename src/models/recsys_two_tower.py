@@ -15,27 +15,50 @@ class MathRecDataset(Dataset):
         self.total_problems = total_problems
         self.neg_ratio = neg_ratio
 
+        self.positive_by_student = (
+            df.groupby("student_idx")["problem_idx"]
+            .apply(set)
+            .to_dict()
+        )
+
+        self.negative_by_student = {}
+
+        for student_id, positives in self.positive_by_student.items():
+            candidates = [
+                p for p in range(total_problems)
+                if p not in positives
+            ]
+
+            if not candidates and neg_ratio > 0:
+                raise ValueError(
+                    f"Нет отрицательных примеров для ученика {student_id}"
+                )
+
+            self.negative_by_student[student_id] = candidates
+
     def __len__(self):
         return len(self.students) * (1 + self.neg_ratio)
 
     def __getitem__(self, idx):
         pos_idx = idx // (1 + self.neg_ratio)
-        s = self.students[pos_idx]
+        student_id = int(self.students[pos_idx])
 
         if idx % (1 + self.neg_ratio) == 0:
-            return (
-                torch.tensor(s, dtype=torch.long),
-                torch.tensor(self.problems[pos_idx], dtype=torch.long),
-                torch.tensor(1.0, dtype=torch.float32),
-            )
+            problem_id = int(self.problems[pos_idx])
+            label = 1.0
         else:
-            neg_p = np.random.randint(0, self.total_problems)
-            return (
-                torch.tensor(s, dtype=torch.long),
-                torch.tensor(neg_p, dtype=torch.long),
-                torch.tensor(0.0, dtype=torch.float32),
+            problem_id = int(
+                np.random.choice(
+                    self.negative_by_student[student_id]
+                )
             )
+            label = 0.0
 
+        return (
+            torch.tensor(student_id, dtype=torch.long),
+            torch.tensor(problem_id, dtype=torch.long),
+            torch.tensor(label, dtype=torch.float32),
+        )
 
 class TutorFlowTwoTower(nn.Module):
 
