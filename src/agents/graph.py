@@ -28,7 +28,7 @@ PHOENIX_DIR = Path(__file__).resolve().parent.parent.parent / ".phoenix"
 PHOENIX_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["PHOENIX_WORKING_DIR"] = str(PHOENIX_DIR)
 
-phoenix_session = px.launch_app()
+phoenix_session = None
 LangChainInstrumentor().instrument()
 
 def close_phoenix():
@@ -106,7 +106,7 @@ def coordinator_node(state: AgentState) -> dict:
       "task_condition (условие задачи, если есть), "
       "student_answer (ответ/решение ученика, если передано). Без Markdown."
   )
-  raw = query_ollama(model="qwen2.5:0.5b", prompt=prompt, num_predict=140)
+  raw = query_ollama(model="llama3.2:3b", prompt=prompt, num_predict=140)
 
   data = {}
   match = re.search(r"\{.*\}", raw, re.DOTALL)
@@ -125,7 +125,12 @@ def coordinator_node(state: AgentState) -> dict:
     )
 
   condition = data.get("task_condition")
-  if not condition or "условие" in condition.lower():
+
+  if (
+    not condition
+    or str(condition).strip().lower() in {"none", "null", "не указано"}
+    or "условие" in str(condition).lower()
+  ):
       eq_match = re.search(r"([0-9x\+\-\*\/\^\(\)\s=]+=[0-9x\+\-\*\/\^\(\)\s]+)", state["user_prompt"])
       condition = eq_match.group(1).strip() if eq_match else state["user_prompt"]
 
@@ -168,7 +173,7 @@ def generator_node(state: AgentState) -> dict:
       "Включи: 1) Цель, 2) Задачу вида ax + b = c, 3) Решение и точный ответ: x = [число]."
   )
   content = query_ollama(
-      model="llama3.2:3b", prompt=prompt, num_predict=220, temperature=0.2
+      model="qwen3:4b", prompt=prompt, num_predict=220, temperature=0.2
   )
   return {"plan": content, "final_output": content}
 
@@ -191,7 +196,10 @@ def sympy_verify_node(state: AgentState) -> dict:
 def solution_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
   task_condition = state.get("task_condition", "")
   student_answer = state.get("student_answer", "")
-
+  print("=== DEBUG SOLUTION CHECKER ===", flush=True)
+  print("task_condition:", repr(task_condition), flush=True)
+  print("student_answer:", repr(student_answer), flush=True)
+  print("==============================", flush=True)
   math_res = run_sandboxed_math(task_condition, variable="x", timeout_sec=3.0)
 
   if math_res["status"] != "success":
@@ -214,9 +222,9 @@ def solution_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
   try:
     if "=" in student_answer:
-      ans_val = float(student_answer.split("=")[1].strip())
+      ans_val = float(student_answer.split("=", 1)[1].strip().replace(",", "."))
     else:
-      ans_val = float(student_answer.strip())
+      ans_val = float(student_answer.strip().replace(",", "."))
 
     is_correct = bool(abs(expected_root - ans_val) < 1e-6)
     solution_desc = (
@@ -246,7 +254,7 @@ def validator_node(state: AgentState) -> dict:
         "Похвали за верный шаг или укажи, где исправить ошибку. 2-3 предложения."
     )
     feedback = query_ollama(
-        model="mistral:7b", prompt=prompt, num_predict=100, temperature=0.1
+        model="gemma3:4b", prompt=prompt, num_predict=100, temperature=0.1
     )
     return {
         "validation_status": "APPROVED",
@@ -260,7 +268,7 @@ def validator_node(state: AgentState) -> dict:
         "Если всё корректно, ответь строго 'APPROVED', иначе 'REJECTED'."
     )
     raw = query_ollama(
-        model="mistral:7b", prompt=prompt, num_predict=50, temperature=0.1
+        model="gemma3:4b", prompt=prompt, num_predict=50, temperature=0.1
     )
     status = "APPROVED" if "APPROVED" in raw.upper() else "NEEDS_REVIEW"
     return {"validation_status": status}

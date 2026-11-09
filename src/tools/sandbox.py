@@ -42,10 +42,24 @@ def extract_pure_equation(raw_str: str) -> str:
         return eq.rstrip(".;, ")
     return raw_str.strip()
 
+def normalize_multiplication(expr: str) -> str:
+    # 2x -> 2*x
+    expr = re.sub(r"(\d)([a-zA-Z])", r"\1*\2", expr)
+
+    # 3(x+1) -> 3*(x+1)
+    expr = re.sub(r"(\d)(\()", r"\1*\2", expr)
+
+    # (x+1)(x-1) -> (x+1)*(x-1)
+    expr = re.sub(r"(\))(\()", r"\1*\2", expr)
+
+    # (x+1)x -> (x+1)*x
+    expr = re.sub(r"(\))([a-zA-Z])", r"\1*\2", expr)
+
+    return expr
 
 def _solve_equation_worker(eq_str: str, variable: str = "x") -> List[Dict[str, Any]]:
     validate_expression_safety(eq_str)
-    clean_eq = extract_pure_equation(eq_str)
+    clean_eq = normalize_multiplication(extract_pure_equation(eq_str))
 
     var = sp.Symbol(variable)
 

@@ -1,3 +1,13 @@
+"""Check dataset/API coverage, optionally exercising real SE-MAS agents.
+
+Examples (from the repository root):
+    py scripts/test_dataset_integration.py
+    py scripts/test_dataset_integration.py --live --id TF-020 --limit 1
+    py scripts/test_dataset_integration.py --live --limit 7
+
+HTTP 200 does not mean the agent's mathematical judgment is correct.
+"""
+
 import argparse
 import csv
 import json
@@ -15,8 +25,9 @@ FIELDS = [
     "is_correct", "feedback", "math_solution", "error",
 ]
 
-# Explicit, reviewed API payloads. These are test fixtures, not dataset ground truth.
-# Review each against benchmarks/dataset.jsonl before interpreting test results.
+# Explicit, reviewed fixtures for the seven check_solution tasks.
+# The currently running API expects {"prompt": ...}, not {"problem", "student_solution"}.
+# Review fixture wording against benchmarks/dataset.jsonl before interpreting results.
 CHECK_SOLUTION_PAYLOADS = {
     "TF-020": {
         "problem": "2(x+3)=14",
@@ -151,11 +162,23 @@ def main():
             "error": "",
         }
         if endpoint:
-            payload = CHECK_SOLUTION_PAYLOADS.get(rec_id)
-            if payload is None:
+            fixture = CHECK_SOLUTION_PAYLOADS.get(rec_id)
+            if fixture is None:
                 item["status"] = "missing_payload"
                 item["error"] = "No reviewed payload for this test ID; request not sent"
             else:
+                # The API takes a single prompt. Keep the original condition distinct
+                # from the student's working so the coordinator has less ambiguity.
+                payload = {
+                    "prompt": (
+                        "Проверь решение ученика по математике.\n"
+                        f"ИСХОДНОЕ УСЛОВИЕ: {fixture['problem']}\n"
+                        f"РЕШЕНИЕ УЧЕНИКА: {fixture['student_solution']}\n"
+                        "Исходным условием является ТОЛЬКО строка после «ИСХОДНОЕ УСЛОВИЕ». "
+                        "Шаги ученика не являются исходным уравнением. "
+                        "Определи правильность, проверь шаги и укажи первую ошибку, если она есть."
+                    )
+                }
                 item["status"] = "ready_for_api"
                 if args.live and (args.limit == 0 or attempted < args.limit):
                     attempted += 1
