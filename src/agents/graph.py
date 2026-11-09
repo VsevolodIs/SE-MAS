@@ -171,9 +171,9 @@ def generator_node(state: AgentState) -> dict:
     weak = state.get("weak_topics", "")
 
     prompt = (
-        f"Составь краткий урок по теме '{topic}' для ученика {grade} класса. "
+        f"Составь краткий урок по теме '{topic}' для ученика {grade} класса "
         f"Уровень: {level}. Пробелы: {weak}. "
-        "Включи: 1) Цель, 2) Задачу вида ax + b = c, 3) Решение и точный ответ: x = [число]."
+        "Включи: 1) Цель, 2) Задачу вида ax + b = c, 3) Решение и точный ответ: x = [число]"
     )
     content = query_ollama(
         model="qwen2.5:3b", prompt=prompt, num_predict=220, temperature=0.2
@@ -201,43 +201,83 @@ def solution_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
     student_answer = state.get("student_answer", "")
 
     math_res = run_sandboxed_math(task_condition, variable="x", timeout_sec=3.0)
+    status = math_res.get("status")
+    details = math_res.get("details", {})
 
-    if math_res["status"] != "success":
+    if status in ["unsupported_format", "math_error", "timeout_error", "security_error"]:
         return {
-            "is_correct": False,
-            "math_solution": f"Специализированная проверка: {math_res['error']}",
+            "is_correct": None,
+            "math_solution": (
+                f"Инструментальная песочница не смогла однозначно вычислить задачу ({math_res.get('error')}) "
+                "Требуется семантическая проверка шагов валидатором"
+            ),
+            "requires_llm_fallback": True,
         }
 
-    roots = math_res["roots"]
+    if details.get("type") == "inequality":
+        solution_str = details.get("solution_str", "")
+        if ("<" in student_answer and ">" in student_answer) and ("&" in solution_str):
+            return {
+                "is_correct": False,
+                "math_solution": f"Ошибка: решение неравенства — интервал {solution_str}, а не объединение лучей",
+                "requires_llm_fallback": False,
+            }
+        return {
+            "is_correct": None,
+            "math_solution": f"Аналитическое решение неравенства SymPy: {solution_str}",
+            "requires_llm_fallback": True,
+        }
+
+    forbidden_roots = details.get("forbidden_roots", [])
+    clean_student_ans = re.sub(r"=\s*0\b", "", student_answer)
+    raw_numbers = re.findall(r"[-+]?\d*\.?\d+", clean_student_ans.replace(",", "."))
+    student_numerics = set()
+    for num_str in raw_numbers:
+        try:
+            val = float(num_str)
+            student_numerics.add(val)
+        except ValueError:
+            pass
+
+    for forb in forbidden_roots:
+        try:
+            forb_val = float(sp.sympify(forb).evalf())
+            if any(abs(forb_val - st) < 1e-4 for st in student_numerics):
+                return {
+                    "is_correct": False,
+                    "math_solution": f"Ошибка ОДЗ: корень x = {forb} обращает знаменатель в ноль и является посторонним",
+                    "requires_llm_fallback": False,
+                }
+        except Exception:
+            pass
+
+    roots = math_res.get("roots", [])
     if not roots:
-        is_no_roots_claimed = any(w in student_answer.lower() for w in ["нет корней", "нет решений", "пусто"])
+        is_no_roots_claimed = any(w in student_answer.lower() for w in ["нет корней", "нет решений", "пусто", "решений нет"])
         return {
             "is_correct": is_no_roots_claimed,
-            "math_solution": "Уравнение не имеет действительных решений",
+            "math_solution": "Уравнение не имеет действительных решений в области допустимых значений.",
+            "requires_llm_fallback": False,
         }
 
     expected_numerics = {r["numeric"] for r in roots if r["numeric"] is not None}
 
-    raw_numbers = re.findall(r"[-+]?\d*\.?\d+", student_answer.replace(",", "."))
-    student_numerics = set()
-    for num_str in raw_numbers:
-        try:
-            student_numerics.add(float(num_str))
-        except ValueError:
-            pass
-
     if len(expected_numerics) > 1:
         matched = sum(any(abs(exp - st) < 1e-4 for st in student_numerics) for exp in expected_numerics)
-        is_correct = (matched == len(expected_numerics))
-        solution_desc = f"Ожидаемые корни: {sorted(list(expected_numerics))}. Распознано у ученика: {sorted(list(student_numerics))}"
-    else:
+        is_correct = (matched == len(expected_numerics)) and (len(student_numerics) <= len(expected_numerics))
+        solution_desc = f"Ожидаемые корни SymPy: {sorted(list(expected_numerics))}. Числа в ответе ученика: {sorted(list(student_numerics))}"
+    elif len(expected_numerics) == 1:
         exp_root = list(expected_numerics)[0]
         is_correct = any(abs(exp_root - st) < 1e-4 for st in student_numerics)
         solution_desc = f"Точный корень SymPy: {exp_root}. Числа в ответе ученика: {sorted(list(student_numerics))}"
+    else:
+        is_correct = None
+        solution_desc = f"Символьный ответ SymPy: {details.get('solution_str')}"
 
     return {
         "is_correct": is_correct,
         "math_solution": solution_desc,
+        "requires_llm_fallback": is_correct is None,
     }
 
 
@@ -245,21 +285,63 @@ def validator_node(state: AgentState) -> dict:
     task_type = state.get("task_type", "lesson_plan")
 
     if task_type == "solve_check":
-        is_ok = state.get("is_correct", False)
+        is_ok = state.get("is_correct")
         details = state.get("math_solution", "")
+        task_condition = state.get("task_condition", "")
+        student_answer = state.get("student_answer", "")
+        requires_fallback = state.get("requires_llm_fallback", False)
+
+        if requires_fallback or is_ok is None:
+            prompt = (
+                "Ты эксперт-методист по математике. Твоя задача — строго оценить ответ ученика\n"
+                f"УСЛОВИЕ ЗАДАЧИ: {task_condition}\n"
+                f"ОТВЕТ УЧЕНИКА: {student_answer}\n"
+                f"КОНТЕКСТ/РЕШЕНИЕ: {details}\n\n"
+                "ПРАВИЛО:\n"
+                "1. Если в геометрии нарушено неравенство треугольника (сумма двух сторон <= третьей) или ответ неверный — пиши строго: ВЕРДИКТ: ОШИБКА\n"
+                "2. Если ответ верный — пиши строго: ВЕРДИКТ: ВЕРНО\n"
+                "3. Со следующей строки дай краткий тактичный комментарий"
+            )
+            raw_response = query_ollama(
+                model="qwen2.5:3b", prompt=prompt, num_predict=140, temperature=0.0
+            )
+
+            lines = [line.strip() for line in raw_response.splitlines() if line.strip()]
+            first_line = lines[0].upper() if lines else ""
+
+            if "ВЕРДИКТ: ОШИБКА" in first_line or "ОШИБКА" in first_line:
+                evaluated_is_correct = False
+            elif "ВЕРДИКТ: ВЕРНО" in first_line or "ВЕРНО" in first_line:
+                evaluated_is_correct = True
+            else:
+                evaluated_is_correct = False
+
+            feedback_text = "\n".join(lines[1:]) if len(lines) > 1 else raw_response
+
+            return {
+                "is_correct": evaluated_is_correct,
+                "validation_status": "APPROVED",
+                "feedback": feedback_text,
+                "final_output": feedback_text,
+            }
+
         prompt = (
-            f"Ты методист по математике. Оформи короткий тактичный комментарий ученику 7 класса. "
-            f"Статус проверки: {'ВЕРНО' if is_ok else 'ОШИБКА'}. Данные: {details}. "
-            "Похвали за верный шаг или укажи, где исправить ошибку. 2-3 предложения."
+            "Ты методист по математике. Оформи короткий тактичный комментарий ученику 7 класса.\n"
+            f"Статус проверки: {'ВЕРНО' if is_ok else 'ОШИБКА'}.\n"
+            f"Математические данные проверки: {details}.\n"
+            f"Ответ ученика: {student_answer}.\n"
+            "Похвали за верный шаг или дружелюбно объясни, где допущена ошибка. 2-3 предложения."
         )
         feedback = query_ollama(
-            model="llama3.2:3b", prompt=prompt, num_predict=100, temperature=0.1
+            model="qwen2.5:3b", prompt=prompt, num_predict=120, temperature=0.1
         )
         return {
+            "is_correct": is_ok,
             "validation_status": "APPROVED",
             "feedback": feedback,
             "final_output": feedback,
         }
+
     else:
         prompt = (
             "Ты эксперт-методист. Проверь материал урока:\n"
@@ -267,7 +349,7 @@ def validator_node(state: AgentState) -> dict:
             "Если всё корректно, ответь строго 'APPROVED', иначе 'REJECTED'."
         )
         raw = query_ollama(
-            model="llama3.2:3b", prompt=prompt, num_predict=50, temperature=0.1
+            model="qwen2.5:3b", prompt=prompt, num_predict=50, temperature=0.1
         )
         status = "APPROVED" if "APPROVED" in raw.upper() else "NEEDS_REVIEW"
         return {"validation_status": status}

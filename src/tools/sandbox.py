@@ -35,14 +35,15 @@ def validate_expression_safety(expr_str: str) -> None:
             raise MathSecurityError(f"Обнаружена запрещенная инструкция: '{keyword}'")
 
 
-def extract_pure_equation(raw_str: str) -> str:
-    match = re.search(r"([0-9a-zA-Z_\*\+\-\/\^\(\)\.\s]+=\s*[-+]?[0-9a-zA-Z_\*\+\-\/\^\(\)\.]+)", raw_str)
-    if match:
-        eq = match.group(1).strip()
-        return eq.rstrip(".;, ")
-    return raw_str.strip()
+def preprocess_math_string(raw_str: str) -> str:
+    expr = raw_str.strip()
 
-def normalize_multiplication(expr: str) -> str:
+    # Замена степени ^ на **
+    expr = expr.replace("^", "**")
+
+    # Замена десятичной запятой: 5,5 -> 5.5
+    expr = re.sub(r"(\d+),(\d+)", r"\1.\2", expr)
+
     # 2x -> 2*x
     expr = re.sub(r"(\d)([a-zA-Z])", r"\1*\2", expr)
 
@@ -55,30 +56,101 @@ def normalize_multiplication(expr: str) -> str:
     # (x+1)x -> (x+1)*x
     expr = re.sub(r"(\))([a-zA-Z])", r"\1*\2", expr)
 
+    # Поддержка процентов: 20% от 250 = 250 * 0.20
+    pct_match = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:от|of)\s*(\d+(?:\.\d+)?)", expr, flags=re.IGNORECASE)
+    if pct_match:
+        pct = float(pct_match.group(1)) / 100.0
+        val = float(pct_match.group(2))
+        return f"{val} * {pct}"
+
     return expr
 
-def _solve_equation_worker(eq_str: str, variable: str = "x") -> List[Dict[str, Any]]:
-    validate_expression_safety(eq_str)
-    clean_eq = normalize_multiplication(extract_pure_equation(eq_str))
+
+def extract_math_relation(raw_str: str) -> Optional[str]:
+    # Поиск знаков отношения: =, <=, >=, <, >
+    pattern = r"([0-9a-zA-Z_\*\+\-\/\^\(\)\.\s]+(?:\<=|\>=|\<|\>|=)\s*[-+]?[0-9a-zA-Z_\*\+\-\/\^\(\)\.]+)"
+    match = re.search(pattern, raw_str)
+    if match:
+        eq = match.group(1).strip()
+        return eq.rstrip(".;, ")
+    return None
+
+
+def _solve_equation_worker(raw_input: str, variable: str = "x") -> Dict[str, Any]:
+    validate_expression_safety(raw_input)
+    clean_str = preprocess_math_string(raw_input)
+    relation = extract_math_relation(clean_str)
 
     var = sp.Symbol(variable)
 
-    if "=" in clean_eq:
-        left_str, right_str = clean_eq.split("=", 1)
-        left_expr = sp.sympify(left_str.strip())
-        right_expr = sp.sympify(right_str.strip())
-        expr = left_expr - right_expr
-    else:
-        expr = sp.sympify(clean_eq.strip())
+    target = relation if relation else clean_str
 
-    solutions = sp.solve(expr, var)
-    parsed_roots = []
-    for sol in solutions:
-        parsed_roots.append({
-            "symbolic": str(sol),
-            "numeric": float(sol.evalf()) if sol.is_real else None,
-        })
-    return parsed_roots
+    for op in ["<=", ">=", "<", ">"]:
+        if op in target:
+            left_s, right_s = target.split(op, 1)
+            left_e = sp.sympify(left_s.strip())
+            right_e = sp.sympify(right_s.strip())
+
+            if op == "<":
+                ineq = left_e < right_e
+            elif op == ">":
+                ineq = left_e > right_e
+            elif op == "<=":
+                ineq = left_e <= right_e
+            else:
+                ineq = left_e >= right_e
+
+            sol = sp.solve(ineq, var)
+            return {
+                "type": "inequality",
+                "solution_str": str(sol),
+                "roots": [],
+                "domain_valid": True,
+            }
+
+    if "=" in target:
+        left_s, right_s = target.split("=", 1)
+        left_e = sp.sympify(left_s.strip())
+        right_e = sp.sympify(right_s.strip())
+        expr = left_e - right_e
+
+        denoms = sp.denom(sp.together(expr))
+        forbidden_roots = sp.solve(denoms, var) if denoms != 1 else []
+
+        raw_solutions = sp.solve(expr, var)
+        parsed_roots = []
+        for sol in raw_solutions:
+            if sol in forbidden_roots:
+                continue
+            parsed_roots.append({
+                "symbolic": str(sol),
+                "numeric": float(sol.evalf()) if sol.is_real else None,
+            })
+
+        return {
+            "type": "equation",
+            "roots": parsed_roots,
+            "forbidden_roots": [str(r) for r in forbidden_roots],
+            "solution_str": ", ".join(str(r["symbolic"]) for r in parsed_roots),
+            "domain_valid": len(forbidden_roots) == 0 or any(s in forbidden_roots for s in raw_solutions),
+        }
+
+    try:
+        expr = sp.sympify(target)
+        val = expr.evalf()
+        return {
+            "type": "expression",
+            "roots": [{"symbolic": str(val), "numeric": float(val) if val.is_real else None}],
+            "solution_str": str(val),
+            "domain_valid": True,
+        }
+    except Exception:
+        return {
+            "type": "unsupported_format",
+            "roots": [],
+            "solution_str": None,
+            "domain_valid": True,
+        }
 
 
 def run_sandboxed_math(
@@ -87,10 +159,20 @@ def run_sandboxed_math(
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_solve_equation_worker, eq_str, variable)
-            roots = future.result(timeout=timeout_sec)
+            res = future.result(timeout=timeout_sec)
+
+            if res.get("type") == "unsupported_format":
+                return {
+                    "status": "unsupported_format",
+                    "roots": [],
+                    "details": res,
+                    "error": "Инструмент не поддерживает текстовый формат задачи; требуется обработка LLM-валидатором",
+                }
+
             return {
                 "status": "success",
-                "roots": roots,
+                "roots": res.get("roots", []),
+                "details": res,
                 "error": None,
             }
     except concurrent.futures.TimeoutError:
