@@ -1,4 +1,4 @@
-import multiprocessing
+import concurrent.futures
 import re
 from typing import Any, Dict, List, Optional
 import sympy as sp
@@ -154,58 +154,53 @@ def _solve_equation_worker(raw_input: str, variable: str = "x") -> Dict[str, Any
             }
         raise e
 
-def _mp_worker(eq_str: str, variable: str, queue: multiprocessing.Queue):
-    try:
-        res = _solve_equation_worker(eq_str, variable)
-        queue.put({"ok": True, "res": res})
-    except MathSecurityError as e:
-        queue.put({"ok": False, "type": "security_error", "error": str(e)})
-    except Exception as e:
-        queue.put({"ok": False, "type": "math_error", "error": f"Ошибка парсинга/вычисления: {str(e)}"})
 
 def run_sandboxed_math(
-        eq_str: str, variable: str = "x", timeout_sec: float = 3.0
+    eq_str: str, variable: str = "x", timeout_sec: float = 3.0
 ) -> Dict[str, Any]:
-    queue = multiprocessing.Queue()
-    proc = multiprocessing.Process(target=_mp_worker, args=(eq_str, variable, queue))
-    proc.start()
-    proc.join(timeout=timeout_sec)
-
-    if proc.is_alive():
-        proc.terminate()
-        proc.kill()
-        proc.join()
+    try:
+        validate_expression_safety(eq_str)
+    except MathSecurityError as e:
         return {
-            "status": "timeout_error",
+            "status": "security_error",
             "roots": [],
-            "error": f"Превышен лимит времени вычисления ({timeout_sec} сек)",
+            "error": str(e),
         }
 
     try:
-        if not queue.empty():
-            payload = queue.get_nowait()
-            if not payload.get("ok"):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_solve_equation_worker, eq_str, variable)
+            res = future.result(timeout=timeout_sec)
+
+            if res.get("type") == "unsupported_format":
                 return {
-                    "status": payload.get("type", "math_error"),
+                    "status": "unsupported_format",
                     "roots": [],
-                    "error": payload.get("error"),
+                    "details": res,
+                    "error": "Инструмент не поддерживает текстовый формат задачи; требуется обработка LLM-валидатором",
                 }
-            res = payload.get("res", {})
+
             return {
                 "status": "success",
                 "roots": res.get("roots", []),
                 "details": res,
                 "error": None,
             }
+    except concurrent.futures.TimeoutError:
+        return {
+            "status": "timeout_error",
+            "roots": [],
+            "error": f"Превышен лимит времени вычисления ({timeout_sec} сек)",
+        }
+    except MathSecurityError as e:
+        return {
+            "status": "security_error",
+            "roots": [],
+            "error": str(e),
+        }
     except Exception as e:
         return {
             "status": "math_error",
             "roots": [],
-            "error": f"Ошибка чтения очереди процесса: {e}",
+            "error": f"Ошибка парсинга/вычисления: {str(e)}",
         }
-
-    return {
-        "status": "math_error",
-        "roots": [],
-        "error": "Процесс песочницы завершился аварийно без ответа",
-    }

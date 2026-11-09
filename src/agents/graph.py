@@ -111,34 +111,32 @@ class AgentState(TypedDict):
 
 
 def coordinator_node(state: AgentState) -> dict:
-    prompt = state.get("user_prompt", "")
+    prompt = state.get("prompt", "")
+    session_id = state.get("session_id", "default_session")
+    student_name = state.get("student_name", "Ученик")
+    grade = state.get("grade", 7)
+    topic = state.get("topic", "Математика")
 
-    session_id = state.get("session_id") or "default_session"
-    history = get_session_history(session_id, limit=4)
-    save_session_message(session_id, "user", state.get("user_prompt", ""))
+    task_condition = state.get("task_condition") or ""
+    student_answer = state.get("student_answer") or ""
 
-    coordinator_spec = load_prompt("coordinator.md")
+    if not task_condition:
+        cond_match = re.search(r"задаче\s+([^.\n]+?)(?:\.|\s+Ученик|$)", prompt, re.IGNORECASE)
+        if cond_match:
+            task_condition = cond_match.group(1).strip()
+        else:
+            eq_match = re.search(r"([0-9a-zA-Z_\*\+\-\/\^\(\)\.\s]+=[0-9a-zA-Z_\*\+\-\/\^\(\)\.\s]+)", prompt)
+            if eq_match:
+                task_condition = eq_match.group(1).strip()
 
-    task_condition = prompt
-    student_answer = ""
-
-    if "ИСХОДНОЕ УСЛОВИЕ:" in prompt and "РЕШЕНИЕ УЧЕНИКА:" in prompt:
-        parts = prompt.split("РЕШЕНИЕ УЧЕНИКА:")
-        cond_part = parts[0].split("ИСХОДНОЕ УСЛОВИЕ:")[-1]
-        task_condition = cond_part.strip().split("\n")[0].strip()
-
-        ans_part = parts[1]
-        for stop_word in ["Исходным условием", "Определи правильность", "\n\n"]:
-            if stop_word in ans_part:
-                ans_part = ans_part.split(stop_word)[0]
-        student_answer = ans_part.strip()
-    else:
-        ans_match = re.search(r"(?:ученик ответил|ответ(?:ил)?|получил)\s*[:\-—]?\s*(.*)", prompt, re.IGNORECASE)
+    if not student_answer:
+        ans_match = re.search(r"(?:ответил|ответ(?:ом)?(?:\s+является)?)\s*[:=]?\s*([^.\n]+)", prompt, re.IGNORECASE)
         if ans_match:
             student_answer = ans_match.group(1).strip()
-            cond_match = re.search(r"(?:по задаче|уравнение|задач[уе])\s*[:\-—]?\s*([^.]+)", prompt, re.IGNORECASE)
-            if cond_match:
-                task_condition = cond_match.group(1).strip()
+        else:
+            ans_val_match = re.search(r"x\s*=\s*[-+]?\d*\.?\d+", prompt, re.IGNORECASE)
+            if ans_val_match:
+                student_answer = ans_val_match.group(0).strip()
 
     p_lower = prompt.lower()
     if student_answer or any(w in p_lower for w in ["проверь", "верно ли", "решение ученика", "исходное условие"]):
@@ -154,26 +152,21 @@ def coordinator_node(state: AgentState) -> dict:
     elif any(w in p_lower for w in ["реши", "найди корень", "вычисли", "сколько будет"]):
         task_type = "solve_math"
     else:
-        try:
-            sys_prompt = f"{coordinator_spec}\n\nЗапрос: {prompt}\nВерни JSON c полем task_type:"
-            raw = query_ollama(model="qwen2.5:3b", prompt=sys_prompt, num_predict=60, temperature=0.0)
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if match:
-                data = json.loads(match.group(0))
-                task_type = data.get("task_type", "pedagogical")
-            else:
-                task_type = "pedagogical"
-        except Exception:
-            task_type = "pedagogical"
+        task_type = "pedagogical"
+
+    history = list(state.get("chat_history") or [])
+    if prompt:
+        history.append({"role": "user", "content": prompt})
 
     return {
         "session_id": session_id,
-        "chat_history": history,
-        "task_type": task_type,
-        "topic": "Математика",
-        "grade": 7,
+        "student_name": student_name,
+        "grade": grade,
+        "topic": topic,
         "task_condition": task_condition,
         "student_answer": student_answer,
+        "task_type": task_type,
+        "chat_history": history,
     }
 
 
@@ -238,7 +231,7 @@ def solution_checker_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "requires_llm_fallback": True,
         }
 
-    math_res = run_sandboxed_math(task_condition, variable="x", timeout_sec=3.0)
+    math_res = run_sandboxed_math(task_condition, variable="x", timeout_sec=5.0)
     status = math_res.get("status")
     details = math_res.get("details", {})
 
@@ -510,17 +503,16 @@ def save_db_node(state: AgentState) -> dict:
 
 def route_task(state: AgentState) -> str:
     task_type = state.get("task_type", "pedagogical")
+
     if task_type == "solve_check":
         return "solution_checker"
     elif task_type == "solve_math":
-        return "solver"
+        return "solver_agent"
     elif task_type == "safety":
-        return "safety_guard"
-    elif task_type == "personalize":
-        return "personalize_node"
-    elif task_type in ["clarify", "multi_step"]:
-        return "explanation_node"
-    return "generator"
+        return "safety_node"
+    elif task_type in ["personalize", "clarify", "multi_step", "pedagogical"]:
+        return "pedagogical_generator"
+    return "pedagogical_generator"
 
 
 def build_tutor_graph():
@@ -564,18 +556,17 @@ def build_tutor_graph():
 
 
 if __name__ == "__main__":
+    phoenix_session = px.launch_app()
+    LangChainInstrumentor().instrument()
+
     app = build_tutor_graph()
-
-    test_check_state = {
-        "user_prompt": (
-            "Проверь решение Ивана по задаче 2*x + 4 = 10. Ученик ответил x = 3."
-        )
+    test_input = {
+        "prompt": "Проверь решение Ивана по задаче 2*x + 4 = 10. Ученик ответил x = 3.",
+        "student_name": "Иван",
+        "task_condition": "2*x + 4 = 10",
+        "student_answer": "x = 3",
+        "task_type": "solve_check"
     }
-
-    print("Запуск проверки решения в TutorFlow AI...\n")
-    for output in app.stream(test_check_state):
-        for node_name, result in output.items():
-            print(f"Завершен узел: {node_name}")
-            for k, v in result.items():
-                print(f"  {k}: {str(v)[:120]}")
-            print()
+    result = app.invoke(test_input)
+    print("\nИтоговый результат:")
+    print(result)
