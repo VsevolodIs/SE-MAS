@@ -1,4 +1,6 @@
-import concurrent.futures
+import json
+import subprocess
+import sys
 import re
 from typing import Any, Dict, List, Optional
 import sympy as sp
@@ -29,6 +31,8 @@ FORBIDDEN_KEYWORDS = [
 
 
 def validate_expression_safety(expr_str: str) -> None:
+    if len(expr_str) > 400:
+        raise MathSecurityError("Слишком длинное математическое выражение")
     expr_lower = expr_str.lower()
     for keyword in FORBIDDEN_KEYWORDS:
         if keyword in expr_lower:
@@ -79,6 +83,13 @@ def extract_math_relation(raw_str: str) -> Optional[str]:
 def _solve_equation_worker(raw_input: str, variable: str = "x") -> Dict[str, Any]:
     validate_expression_safety(raw_input)
     clean_str = preprocess_math_string(raw_input)
+    # Only a small algebraic grammar is accepted by SymPy. Natural-language
+    # questions are routed to the LLM and are never passed to sympify().
+    if re.search(r"[^0-9a-zA-Z.,+\-*/^()=<>\s%]", clean_str):
+        return {"type": "unsupported_format", "roots": [], "solution_str": None}
+    identifiers = re.findall(r"[A-Za-z]+", clean_str)
+    if any(name not in {"x", "y", "a", "b", "c", "d", "n", "sqrt"} for name in identifiers):
+        return {"type": "unsupported_format", "roots": [], "solution_str": None}
     relation = extract_math_relation(clean_str)
 
     var = sp.Symbol(variable)
@@ -120,7 +131,7 @@ def _solve_equation_worker(raw_input: str, variable: str = "x") -> Dict[str, Any
         raw_solutions = sp.solve(expr, var)
         parsed_roots = []
         for sol in raw_solutions:
-            if sol in forbidden_roots:
+            if sol in forbidden_roots or sol.is_real is False:
                 continue
             parsed_roots.append({
                 "symbolic": str(sol),
@@ -132,7 +143,7 @@ def _solve_equation_worker(raw_input: str, variable: str = "x") -> Dict[str, Any
             "roots": parsed_roots,
             "forbidden_roots": [str(r) for r in forbidden_roots],
             "solution_str": ", ".join(str(r["symbolic"]) for r in parsed_roots),
-            "domain_valid": len(forbidden_roots) == 0 or any(s in forbidden_roots for s in raw_solutions),
+            "domain_valid": True,  # only admissible real roots are retained
         }
 
     try:
@@ -158,54 +169,64 @@ def _solve_equation_worker(raw_input: str, variable: str = "x") -> Dict[str, Any
 def run_sandboxed_math(
     eq_str: str, variable: str = "x", timeout_sec: float = 3.0
 ) -> Dict[str, Any]:
+    """Run SymPy in a killable child process, not a ThreadPoolExecutor.
+
+    Important: process termination is NOT a VM/container security boundary.
+    This supports bounded time and prevents a hung calculation from keeping a
+    Python worker thread alive. Untrusted inputs still require an OS sandbox.
+    """
     try:
         validate_expression_safety(eq_str)
-    except MathSecurityError as e:
-        return {
-            "status": "security_error",
-            "roots": [],
-            "error": str(e),
-        }
+    except MathSecurityError as exc:
+        return {"status": "security_error", "roots": [], "error": str(exc)}
 
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    request = json.dumps({"expression": eq_str, "variable": variable}, ensure_ascii=False)
     try:
-        future = executor.submit(_solve_equation_worker, eq_str, variable)
-        res = future.result(timeout=timeout_sec)
-
-        if res.get("type") == "unsupported_format":
-            return {
-                "status": "unsupported_format",
-                "roots": [],
-                "details": res,
-                "error": "Инструмент не поддерживает текстовый формат задачи; требуется обработка LLM-валидатором",
-            }
-
+        proc = subprocess.run(
+            [sys.executable, "-m", "src.tools.sandbox", "--worker"],
+            input=request,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout_sec,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
         return {
-            "status": "success",
-            "roots": res.get("roots", []),
-            "details": res,
-            "error": None,
-        }
-    except concurrent.futures.TimeoutError:
-        executor.shutdown(wait=False, cancel_futures=True)
-        return {
-            "status": "timeout_error",
-            "roots": [],
+            "status": "timeout_error", "roots": [],
             "error": f"Превышен лимит времени вычисления ({timeout_sec} сек)",
         }
-    except MathSecurityError as e:
-        executor.shutdown(wait=False)
-        return {
-            "status": "security_error",
-            "roots": [],
-            "error": str(e),
-        }
-    except Exception as e:
-        executor.shutdown(wait=False)
-        return {
-            "status": "math_error",
-            "roots": [],
-            "error": f"Ошибка парсинга/вычисления: {str(e)}",
-        }
-    finally:
-        executor.shutdown(wait=False)
+    except OSError as exc:
+        return {"status": "math_error", "roots": [], "error": f"Запуск вычисления невозможен: {exc}"}
+
+    if proc.returncode != 0:
+        return {"status": "math_error", "roots": [], "error": "Дочерний процесс вычисления завершился с ошибкой"}
+    try:
+        output = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"status": "math_error", "roots": [], "error": "Некорректный JSON от математического процесса"}
+    if output.get("error_type") == "MathSecurityError":
+        return {"status": "security_error", "roots": [], "error": output.get("error", "Запрещённый ввод")}
+    if "error" in output:
+        return {"status": "math_error", "roots": [], "error": output["error"]}
+    if output.get("type") == "unsupported_format":
+        return {"status": "unsupported_format", "roots": [], "details": output,
+                "error": "Текстовая задача не поддерживается символьным парсером"}
+    return {"status": "success", "roots": output.get("roots", []),
+            "details": output, "error": None}
+
+
+def _worker_main() -> None:
+    """Private JSON-in/JSON-out entrypoint for the subprocess."""
+    try:
+        payload = json.loads(sys.stdin.read())
+        res = _solve_equation_worker(payload["expression"], payload.get("variable", "x"))
+    except Exception as exc:
+        # Return only a sanitized exception category, not a traceback.
+        res = {"error": str(exc)[:300], "error_type": type(exc).__name__}
+    sys.stdout.write(json.dumps(res, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--worker"]:
+        _worker_main()

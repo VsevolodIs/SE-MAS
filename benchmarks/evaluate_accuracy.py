@@ -1,22 +1,7 @@
 import json
-import os
 import sys
-import tempfile
 import time
 from pathlib import Path
-
-_orig_cleanup = tempfile.TemporaryDirectory._cleanup
-
-
-@classmethod
-def _safe_cleanup(cls, *args, **kwargs):
-    try:
-        _orig_cleanup(*args, **kwargs)
-    except Exception:
-        pass
-
-
-tempfile.TemporaryDirectory._cleanup = _safe_cleanup
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -64,7 +49,7 @@ def run_accuracy_evaluation():
             if is_match:
                 correct_verdicts += 1
 
-            sandbox_ok = "math_error" not in math_sol.lower() and "не удалось" not in math_sol.lower()
+            sandbox_ok = final_state.get("math_verified") is True
             if sandbox_ok:
                 math_sandbox_success += 1
 
@@ -100,7 +85,7 @@ def run_accuracy_evaluation():
         "total_cases": total_count,
         "correct_verdicts": correct_verdicts,
         "verdict_accuracy_percent": accuracy,
-        "sandbox_success_percent": sandbox_accuracy,
+        "confirmed_math_verified_percent": sandbox_accuracy,
         "avg_case_latency_sec": avg_latency,
         "results": detailed_results
     }
@@ -111,7 +96,7 @@ def run_accuracy_evaluation():
     print("ИТОГИ ОЦЕНКИ ТОЧНОСТИ:")
     print(f"  Всего тестов: {total_count}")
     print(f"  Верных вердиктов: {correct_verdicts}/{total_count} ({accuracy}%)")
-    print(f"  Успешных расчетов песочницы: {math_sandbox_success}/{total_count} ({sandbox_accuracy}%)")
+    print(f"  Строго подтверждено математических проверок: {math_sandbox_success}/{total_count} ({sandbox_accuracy}%)")
     print(f"  Среднее время на задачу: {avg_latency} с")
     print(f"  Результаты сохранены в: {RESULTS_PATH}")
 

@@ -1,23 +1,8 @@
 import json
-import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 import httpx
-
-_orig_cleanup = tempfile.TemporaryDirectory._cleanup
-
-
-@classmethod
-def _safe_cleanup(cls, *args, **kwargs):
-    try:
-        _orig_cleanup(*args, **kwargs)
-    except Exception:
-        pass
-
-
-tempfile.TemporaryDirectory._cleanup = _safe_cleanup
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))

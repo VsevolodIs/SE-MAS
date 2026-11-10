@@ -20,3 +20,14 @@ def test_sandbox_syntax_error_handling():
   bad_input = "2 * x +++"
   result = run_sandboxed_math(bad_input, timeout_sec=2.0)
   assert result["status"] == "math_error"
+
+def test_no_complex_roots_in_real_domain():
+    result = run_sandboxed_math('x^2 + 1 = 0', timeout_sec=5)
+    assert result['status'] == 'success'
+    assert result['roots'] == []
+
+
+def test_forbidden_root_removed():
+    result = run_sandboxed_math('(x^2-4)/(x-2)=0', timeout_sec=5)
+    assert result['status'] == 'success'
+    assert {r['numeric'] for r in result['roots']} == {-2.0}
