@@ -1,5 +1,5 @@
 import unittest
-from scripts.recsys_metrics import evaluate_top_k
+from src.models.recsys_metrics import evaluate_top_k
 
 
 class MetricsTest(unittest.TestCase):

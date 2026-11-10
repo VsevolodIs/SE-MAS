@@ -1,4 +1,4 @@
-from scripts.recsys_metrics import evaluate_top_k
+from src.models.recsys_metrics import evaluate_top_k
 from pathlib import Path
 import numpy as np
 import pandas as pd
