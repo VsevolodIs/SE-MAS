@@ -95,17 +95,9 @@ def generate_math_interactions():
     num_students = 150
     num_problems = 80
 
-    topics = [
-        "linear_equations",
-        "fractions",
-        "percentages",
-        "quadratic_basics",
-        "word_problems",
-    ]
     records = []
 
     for s_id in range(num_students):
-        fav_topics = np.random.choice(topics, size=2, replace=False)
         n_solved = np.random.randint(6, 15)
 
         for _ in range(n_solved):

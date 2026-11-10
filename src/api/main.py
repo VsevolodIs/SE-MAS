@@ -1,15 +1,11 @@
-import sys
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any, Dict, Optional
 from src.agents.graph import build_tutor_graph
+from src.observability.telemetry import record_request
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
 
 tutor_app = None
 
@@ -35,7 +31,7 @@ class CheckSolutionRequest(BaseModel):
         ...,
         min_length=5,
         description="Текст задачи с ответом ученика",
-        example="Проверь решение Ивана по задаче 2*x + 4 = 10. Ученик ответил x = 3.",
+        json_schema_extra={"example": "Проверь решение Ивана по задаче 2*x + 4 = 10. Ученик ответил x = 3."},
     )
 
 
@@ -51,6 +47,47 @@ class CheckSolutionResponse(BaseModel):
     )
     latency_sec: float = Field(
         ..., description="Время обработки запроса в секундах"
+    )
+
+
+class AgentRequest(BaseModel):
+    user_prompt: str = Field(..., min_length=2, max_length=4000)
+    grade: Optional[int] = Field(None, ge=5, le=9)
+    student_level: Optional[str] = Field(None, max_length=100)
+    weak_topics: Optional[str] = Field(None, max_length=500)
+
+
+class AgentResponse(BaseModel):
+    trace_id: Optional[str] = None
+    task_type: Optional[str] = None
+    validation_status: Optional[str] = None
+    final_output: Optional[str] = None
+    is_correct: Optional[bool] = None
+    latency_sec: float
+
+
+@app.post("/api/v1/agent", response_model=AgentResponse)
+def run_agent(request: AgentRequest):
+    """Public entrypoint to the entire multi-agent workflow, not just answer-checking."""
+    if tutor_app is None:
+        raise HTTPException(status_code=503, detail="Граф агентов не инициализирован")
+    started = time.perf_counter()
+    # Public access to a named student profile requires authentication and authorization.
+    payload = request.model_dump(exclude_none=True)
+    try:
+        output = tutor_app.invoke(payload)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Не удалось выполнить агентный запрос")
+    elapsed = round(time.perf_counter() - started, 3)
+    record_request(endpoint="/api/v1/agent", task_type=output.get("task_type"),
+                   validation_status=output.get("validation_status"), latency_sec=elapsed,
+                   trace_id=output.get("trace_id"))
+    return AgentResponse(
+        trace_id=output.get("trace_id"), task_type=output.get("task_type"),
+        validation_status=output.get("validation_status"),
+        final_output=output.get("final_output"),
+        is_correct=output.get("is_correct"),
+        latency_sec=elapsed,
     )
 
 
@@ -76,7 +113,6 @@ def check_solution(request: CheckSolutionRequest):
 
     try:
         input_payload = {
-            "prompt": request.prompt,
             "user_prompt": request.prompt,
         }
 
@@ -87,26 +123,24 @@ def check_solution(request: CheckSolutionRequest):
 
         elapsed = round(time.perf_counter() - start_time, 2)
 
+        if final_state.get("task_type") != "solve_check":
+            raise HTTPException(status_code=422,
+                                detail="Запрос не распознан как проверка решения")
         is_correct = final_state.get("is_correct")
-        math_sol = str(final_state.get("math_solution") or "")
-        math_verified = final_state.get("math_verified")
-
-        if is_correct is None:
-            if math_verified is True or "подтвержден SymPy" in math_sol or "Точный корень SymPy" in math_sol:
-                is_correct = True
-
         feedback = final_state.get("feedback")
-        if not feedback and is_correct is True:
-            feedback = "Решение проверено и подтверждено математической песочницей."
-
+        record_request(endpoint="/api/v1/check-solution", task_type=final_state.get("task_type"),
+                       validation_status=final_state.get("validation_status"), latency_sec=elapsed,
+                       trace_id=final_state.get("trace_id"))
         return CheckSolutionResponse(
             is_correct=is_correct,
             math_solution=final_state.get("math_solution"),
             feedback=feedback,
             latency_sec=elapsed,
         )
-    except Exception as exc:
+    except HTTPException:
+        raise
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Ошибка выполнения пайплайна: {str(exc)}",
+            detail="Внутренняя ошибка обработки запроса",
         )

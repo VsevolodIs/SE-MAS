@@ -1,14 +1,24 @@
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Optional
 
 DB_PATH = Path(__file__).resolve().parent / "tutorflow.db"
 
 
-def get_connection() -> sqlite3.Connection:
-  conn = sqlite3.connect(DB_PATH)
-  conn.row_factory = sqlite3.Row
-  return conn
+@contextmanager
+def get_connection():
+    """Open a transaction and always close its file handle."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
@@ -132,24 +142,19 @@ def save_assignment_result(
     conn.commit()
     return cursor.lastrowid
 
-def save_session_message(session_id: str, role: str, content: str):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO session_messages (session_id, role, content) VALUES (?, ?, ?)",
-        (session_id, role, content)
-    )
-    conn.commit()
+def save_session_message(session_id: str, role: str, content: str) -> None:
+    with get_connection() as conn:
+        conn.execute("INSERT INTO session_messages (session_id, role, content) VALUES (?, ?, ?)",
+                     (session_id, role, content))
+
 
 def get_session_history(session_id: str, limit: int = 5) -> list:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT role, content FROM session_messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-        (session_id, limit)
-    )
-    rows = cursor.fetchall()
-    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT role, content FROM session_messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (session_id, max(1, min(limit, 100))),
+        ).fetchall()
+        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 if __name__ == "__main__":
   init_db()
