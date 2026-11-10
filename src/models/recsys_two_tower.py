@@ -1,3 +1,4 @@
+from src.models.recsys_metrics import evaluate_top_k
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -14,27 +15,50 @@ class MathRecDataset(Dataset):
         self.total_problems = total_problems
         self.neg_ratio = neg_ratio
 
+        self.positive_by_student = (
+            df.groupby("student_idx")["problem_idx"]
+            .apply(set)
+            .to_dict()
+        )
+
+        self.negative_by_student = {}
+
+        for student_id, positives in self.positive_by_student.items():
+            candidates = [
+                p for p in range(total_problems)
+                if p not in positives
+            ]
+
+            if not candidates and neg_ratio > 0:
+                raise ValueError(
+                    f"Нет отрицательных примеров для ученика {student_id}"
+                )
+
+            self.negative_by_student[student_id] = candidates
+
     def __len__(self):
         return len(self.students) * (1 + self.neg_ratio)
 
     def __getitem__(self, idx):
         pos_idx = idx // (1 + self.neg_ratio)
-        s = self.students[pos_idx]
+        student_id = int(self.students[pos_idx])
 
         if idx % (1 + self.neg_ratio) == 0:
-            return (
-                torch.tensor(s, dtype=torch.long),
-                torch.tensor(self.problems[pos_idx], dtype=torch.long),
-                torch.tensor(1.0, dtype=torch.float32),
-            )
+            problem_id = int(self.problems[pos_idx])
+            label = 1.0
         else:
-            neg_p = np.random.randint(0, self.total_problems)
-            return (
-                torch.tensor(s, dtype=torch.long),
-                torch.tensor(neg_p, dtype=torch.long),
-                torch.tensor(0.0, dtype=torch.float32),
+            problem_id = int(
+                np.random.choice(
+                    self.negative_by_student[student_id]
+                )
             )
+            label = 0.0
 
+        return (
+            torch.tensor(student_id, dtype=torch.long),
+            torch.tensor(problem_id, dtype=torch.long),
+            torch.tensor(label, dtype=torch.float32),
+        )
 
 class TutorFlowTwoTower(nn.Module):
 
@@ -144,23 +168,46 @@ if __name__ == "__main__":
         all_p_vecs = nn.functional.normalize(all_p_vecs, p=2, dim=1)
 
         hits, total = 0, 0
-        ground_truth_map = test_df.groupby("student_idx")["problem_idx"].apply(set)
+        ground_truth_map = (
+            test_df.groupby("student_idx")["problem_idx"]
+            .apply(set)
+            .to_dict()
+        )
 
-        for s_idx, target_problems in ground_truth_map.items():
-            if not target_problems:
-                continue
+        seen_map = (
+            train_df.groupby("student_idx")["problem_idx"]
+            .apply(set)
+            .to_dict()
+        )
+
+        recommendations = {}
+
+        for s_idx in ground_truth_map:
             s_t = torch.tensor([s_idx], dtype=torch.long)
+
             s_vec = model.student_mlp(model.student_emb(s_t))
             s_vec = nn.functional.normalize(s_vec, p=2, dim=1)
 
             scores = torch.matmul(s_vec, all_p_vecs.T).squeeze(0)
-            top10 = torch.topk(scores, k=10).indices.tolist()
 
-            if len(target_problems.intersection(top10)) > 0:
-                hits += 1
-            total += 1
+            # Сортируем все задания по релевантности
+            ranked = torch.argsort(scores, descending=True).tolist()
 
-        recall_10 = hits / total if total > 0 else 0.0
+            # Убираем уже просмотренные задания
+            seen = seen_map.get(s_idx, set())
+            recommendations[s_idx] = [
+                p for p in ranked if p not in seen
+            ][:10]
 
-    print(f"Результаты TutorFlow RecSys (Two-Tower)")
-    print(f"Метрика Recall@10 на тестовых задачах: {recall_10:.4f}")
+        metrics = evaluate_top_k(
+            recommendations=recommendations,
+            relevant=ground_truth_map,
+            seen=seen_map,
+            k=10,
+        )
+
+    print("\nРезультаты TutorFlow RecSys (Two-Tower)")
+    print(f"Оценено учеников: {metrics['users_evaluated']}")
+    print(f"HitRate@10: {metrics['hit_rate_at_k']:.4f}")
+    print(f"Recall@10: {metrics['recall_at_k']:.4f}")
+    print(f"Precision@10: {metrics['precision_at_k']:.4f}")

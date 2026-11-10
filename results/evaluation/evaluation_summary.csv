@@ -1,0 +1,4 @@
+﻿model,total,completed,truncated,errors,completion_percent,avg_ttft_s,avg_tps,avg_wall_s,candidate_pass,candidate_fail,manual_or_unrated
+gemma3:4b,42,40,2,0,95.24,5.274,11.392,32.686,8,1,33
+llama3.2:3b,42,42,0,0,100.0,3.183,13.373,22.308,8,1,33
+qwen3:4b,42,22,20,0,52.38,5.69,5.617,199.898,9,0,33
