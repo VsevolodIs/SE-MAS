@@ -5,7 +5,9 @@ from src.agents.graph import build_tutor_graph
 from src.observability.telemetry import record_request
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
+from src.observability.phoenix_tracing import setup_phoenix_tracing
 
+setup_phoenix_tracing()
 
 tutor_app = None
 
