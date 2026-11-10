@@ -1,0 +1,48 @@
+{
+  "status": "ok",
+  "event_file": ".runtime\\events.jsonl",
+  "events": 10,
+  "malformed_lines": 0,
+  "requests": {
+    "total": 3,
+    "by_endpoint": {
+      "/api/v1/agent": 2,
+      "/api/v1/check-solution": 1
+    },
+    "by_task_type": {
+      "pedagogical": 1,
+      "solve_check": 1,
+      "solve_math": 1
+    },
+    "validation_statuses": {
+      "NEEDS_REVIEW": 1,
+      "UNKNOWN": 1,
+      "APPROVED": 1
+    },
+    "latency_avg_sec": 52.955,
+    "latency_max_sec": 158.866,
+    "slow_over_60_sec": 1
+  },
+  "graph": {
+    "node_spans": 5,
+    "failed_spans": 0,
+    "by_node": {
+      "coordinator": 1,
+      "student_profile": 1,
+      "solver_agent": 1,
+      "validator": 1,
+      "save_db": 1
+    }
+  },
+  "llm": {
+    "calls": 2,
+    "by_model": {
+      "llama3.2:3b": 1,
+      "qwen2.5:3b": 1
+    },
+    "mean_generation_tps": 4.258
+  },
+  "local_alerts": [
+    "SLOW_REQUESTS: 1 requests exceeded 60 sec"
+  ]
+}
