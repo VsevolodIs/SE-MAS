@@ -65,7 +65,7 @@ os.environ["HTTP_PROXY"] = ""
 os.environ["HTTPS_PROXY"] = ""
 
 http_client = httpx.Client(
-    base_url="http://127.0.0.1:11434", timeout=120.0, trust_env=False
+    base_url="http://127.0.0.1:11434", timeout=180.0, trust_env=False
 )
 
 
@@ -130,7 +130,11 @@ def coordinator_node(state: AgentState) -> dict:
                 task_condition = eq_match.group(1).strip().rstrip(".;, ")
 
     if not student_answer:
-        ans_match = re.search(r"(?:ученик ответил|ответ(?:ом)?(?:\s+является)?|ответил)\s*[:=]?\s*([^.\n]+)", prompt, re.IGNORECASE)
+        ans_match = re.search(
+            r"(?:ученик\s+ответил|ответ(?:ом)?\s+является|ответ\s*[:=])\s*([^\n.]+)",
+            prompt,
+            re.IGNORECASE,
+        )
         if ans_match:
             student_answer = ans_match.group(1).strip().rstrip(".;, ")
         else:
@@ -189,21 +193,51 @@ def student_profile_node(state: AgentState) -> dict:
 
 
 def generator_node(state: AgentState) -> dict:
-    topic = state.get("topic", "Линейные уравнения")
-    grade = state.get("grade", 7)
-    level = state.get("student_level", "базовый")
-    weak = state.get("weak_topics", "")
+    topic = state.get("topic") or "Математика"
+    grade = state.get("grade") or 7
+    level = state.get("student_level") or "базовый"
+    weak = state.get("weak_topics") or "не указаны"
+    user_request = state.get("user_prompt") or ""
 
     prompt = (
-        f"Составь краткий урок по теме '{topic}' для ученика {grade} класса "
-        f"Уровень: {level}. Пробелы: {weak}. "
-        "Включи: 1) Цель, 2) Задачу вида ax + b = c, 3) Решение и точный ответ: x = [число]"
-    )
-    content = query_ollama(
-        model="qwen2.5:3b", prompt=prompt, num_predict=220, temperature=0.2
-    )
-    return {"plan": content, "final_output": content}
+        "Ты — преподаватель математики для учеников 5–9 классов.\n"
+        "Твоя задача — выполнить конкретный запрос пользователя.\n\n"
 
+        f"ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{user_request}\n\n"
+
+        "ДАННЫЕ ОБ УЧЕНИКЕ:\n"
+        f"Класс: {grade}\n"
+        f"Тема из профиля: {topic}\n"
+        f"Уровень: {level}\n"
+        f"Слабые темы: {weak}\n\n"
+
+        "ПРАВИЛА:\n"
+        "1. Следуй прежде всего явному запросу пользователя.\n"
+        "2. Если пользователь указал тему, используй именно её.\n"
+        "3. Если пользователь указал класс, учитывай его.\n"
+        "4. Если указано количество заданий, создай ровно столько.\n"
+        "5. Если пользователь просит ответы, добавь ответы к каждому заданию.\n"
+        "6. Если пользователь просит план урока, составь план урока, "
+        "а не просто список упражнений.\n"
+        "7. Если пользователь просит объяснение, дай пошаговое объяснение.\n"
+        "8. Проверяй математическую правильность решений и ответов.\n"
+        "9. Не подменяй запрошенную тему линейными уравнениями.\n"
+        "10. Отвечай на русском языке, понятно для указанного класса.\n\n"
+
+        "Выдай только результат выполнения запроса."
+    )
+
+    content = query_ollama(
+        model="qwen2.5:3b",
+        prompt=prompt,
+        num_predict=600,
+        temperature=0.2,
+    )
+
+    return {
+        "plan": content,
+        "final_output": content,
+    }
 
 def sympy_verify_node(state: AgentState) -> dict:
     text = state.get("plan", "")
